@@ -2,6 +2,42 @@
 
 **中文** | [English](README_EN.md)
 
+# 建议执行的运行时验证
+
+# 1. 预编译镜像一键拉起
+cp .env.example .env
+docker compose -f docker-compose.prebuilt.yml up -d --pull always --wait
+curl -s http://127.0.0.1:8083/api/health
+# 2. 从源码构建（如果想验 Dockerfile）
+docker compose up -d --build --wait
+curl -s http://127.0.0.1:8083/api/health
+# 3. 后端单测
+cd backend && ./mvnw test
+# 4. H5 构建与单测
+cd h5 && npm ci && npm test && npm run build
+# 5. TV Debug APK
+cd android-tv && ./gradlew testDebugUnitTest assembleDebug
+# 产物: app/build/outputs/apk/debug/app-debug.apk
+
+
+# 构建多架构镜像（amd64 + arm64，同时支持 NAS 和 Mac）
+# 1. 启用 docker buildx（Docker Desktop 已内置）
+docker buildx create --use
+docker buildx inspect --bootstrap
+# 2. 开启 docker manifest 创建多架构镜像清单
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --build-arg KTV_RELEASE_VERSION=0.1.0 \
+  --build-arg KTV_RELEASE_VERSION_CODE=1 \
+  -t toretto5060/ktv-home:0.1.0 \
+  -t toretto5060/ktv-home:latest \
+  --push \
+  -f backend/Dockerfile \
+  .
+这一步会同时编译 amd64 和 arm64 两个镜像并一起推送，耗时较长（15~30 分钟），但镜像在所有平台上都能原生运行。
+
+
+
 ## 界面预览
 
 | 手机点歌首页 | Android TV 待机页 | 曲库与服务仪表盘 |
