@@ -171,12 +171,16 @@ class SetupActivity : AppCompatActivity() {
     }
 
     private fun submitManual() {
-        val host = AppConfig.normalizeHost(binding.inputHost.text.toString())
+        val raw = binding.inputHost.text.toString()
+        val host = AppConfig.normalizeHost(raw)
         if (host == null) {
             Toast.makeText(this, R.string.setup_empty, Toast.LENGTH_SHORT).show()
             return
         }
-        verifyAndConnect(SavedServer(host, host), binding.btnConnect)
+        // 存储带协议的完整地址用于 API 调用
+        config.serverHost = host
+        val displayHost = host.removePrefix("https://").removePrefix("http://")
+        verifyAndConnect(SavedServer(displayHost, displayHost), binding.btnConnect)
     }
 
     private fun connect(server: SavedServer) {
@@ -186,10 +190,15 @@ class SetupActivity : AppCompatActivity() {
 
     private fun verifyAndConnect(server: SavedServer, button: Button) {
         button.isEnabled = false
+        // 优先用 config.serverHost（有协议前缀），没有则用 server.hostPort + 默认 http
+        val hostToValidate = config.serverHost
+            ?: if (server.hostPort.startsWith("https://", ignoreCase = true)) server.hostPort
+               else "http://${server.hostPort}"
         binding.txtScanStatus.text = getString(R.string.setup_verifying, server.hostPort)
         lifecycleScope.launch {
-            if (scanner.validate(server.hostPort)) {
-                config.rememberServer(server)
+            if (scanner.validate(hostToValidate)) {
+                // 用 config.serverHost 存入历史记录，而不是 server.hostPort（无协议）
+                config.rememberServer(hostToValidate, server.name)
                 startActivity(Intent(this@SetupActivity, MainActivity::class.java))
                 finish()
             } else {

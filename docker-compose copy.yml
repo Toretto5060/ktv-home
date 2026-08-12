@@ -1,0 +1,93 @@
+name: home-ktv
+
+services:
+  # PostgreSQL stores application metadata; it is internal-only and has no host port.
+  # PostgreSQL 保存应用元数据；仅在 Docker 网络内可访问，未暴露宿主机端口。
+  db:
+    image: ${KTV_IMAGE_REGISTRY:-docker.m.daocloud.io}/library/postgres:16-alpine
+    container_name: ${KTV_DB_CONTAINER_NAME:-ktv-db}
+    environment:
+      POSTGRES_DB: ${KTV_DB_NAME:-ktv}
+      POSTGRES_USER: ${KTV_DB_USER:-ktv}
+      POSTGRES_PASSWORD: ${KTV_DB_PASSWORD:-ktv}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - type: bind
+        source: ${KTV_PG_DIR:-./postgres}
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 1m
+
+  ktv:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        BASE_REGISTRY: ${KTV_IMAGE_REGISTRY:-docker.m.daocloud.io}
+    image: ${KTV_APP_IMAGE:-home-ktv:latest}
+    container_name: ${KTV_APP_CONTAINER_NAME:-ktv-app}
+    environment:
+      # Keep the application listener aligned with the published TCP port below.
+      # 应用监听端口需与下方发布的 TCP 端口保持一致。
+      SERVER_PORT: ${KTV_HTTP_PORT:-8080}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${KTV_DB_NAME:-ktv}
+      SPRING_DATASOURCE_USERNAME: ${KTV_DB_USER:-ktv}
+      SPRING_DATASOURCE_PASSWORD: ${KTV_DB_PASSWORD:-ktv}
+      KTV_SOURCE_LIBRARY_PATH: /source-music
+      KTV_LIBRARY_PATH: /music
+      KTV_DATA_PATH: /data
+      KTV_DISCOVERY_ENABLED: ${KTV_DISCOVERY_ENABLED:-true}
+      # The TV client scans this UDP port to discover the server.
+      # 电视端通过扫描此 UDP 端口发现服务端。
+      KTV_DISCOVERY_UDP_PORT: ${KTV_DISCOVERY_UDP_PORT:-18888}
+      KTV_DISCOVERY_NAME: ${KTV_DISCOVERY_NAME:-家庭KTV}
+      KTV_AI_ENABLED: ${KTV_AI_ENABLED:-false}
+      KTV_AI_BASE_URL: ${KTV_AI_BASE_URL:-https://api.deepseek.com}
+      KTV_AI_API_KEY: ${KTV_AI_API_KEY:-}
+      KTV_AI_MODEL: ${KTV_AI_MODEL:-deepseek-v4-flash}
+      KTV_AI_AUTO_APPLY_CONFIDENCE: ${KTV_AI_AUTO_APPLY_CONFIDENCE:-0.90}
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=70 -Xmx512m}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # TCP HTTP API/UI port for browsers, phones, and TV clients.
+      # 面向浏览器、手机和电视端的 TCP HTTP API/UI 端口。
+      - "${KTV_HTTP_PORT:-8080}:${KTV_HTTP_PORT:-8080}/tcp"
+      # TV discovery port: the TV client scans this exact UDP port. Do not change
+      # it unless the TV client scan configuration is changed at the same time.
+      # 电视端发现端口：电视端只扫描此 UDP 端口。除非同时修改电视端扫描配置，否则不要更改。
+      - "${KTV_DISCOVERY_UDP_PORT:-18888}:${KTV_DISCOVERY_UDP_PORT:-18888}/udp"
+    volumes:
+      - type: bind
+        source: ${KTV_SOURCE_MUSIC_DIR:-./source-music}
+        target: /source-music
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${KTV_MUSIC_DIR:-./music}
+        target: /music
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${KTV_DATA_DIR:-./data}
+        target: /data
+        bind:
+          create_host_path: true
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${SERVER_PORT}/api/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 30s

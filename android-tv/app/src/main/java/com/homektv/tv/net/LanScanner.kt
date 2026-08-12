@@ -61,12 +61,14 @@ class LanScanner {
         (1..254).map { last -> "$prefix$last:$port" }
     }
 
-    /** 单地址探测：GET http://host:port/api/health，body 含 "home-ktv" 即命中。 */
+    /** 单地址探测：GET http(s)://host:port/api/health，body 含 "home-ktv" 即命中。 */
     suspend fun validate(hostPort: String): Boolean = withContext(Dispatchers.IO) {
         withTimeoutOrNull(PROBE_TIMEOUT_MS + 300) {
             try {
+                val isHttps = hostPort.startsWith("https://", ignoreCase = true)
+                val url = if (isHttps) hostPort else "http://$hostPort"
                 val req = Request.Builder()
-                    .url("http://$hostPort/api/health")
+                    .url("$url/api/health")
                     .get()
                     .build()
                 client.newCall(req).execute().use { resp ->

@@ -20,10 +20,20 @@ class AppConfig(context: Context) {
         migrateLegacyServer()
     }
 
-    /** 形如 192.168.1.10:8080 的服务端 host:port（已归一化）。未配置时为 null。 */
+    /**
+     * 形如 192.168.1.10:8080 的服务端 host:port（已归一化）。未配置时为 null。
+     * 现在支持存储 https:// 前缀。
+     */
     var serverHost: String?
         get() = prefs.getString(KEY_HOST, null)
         set(value) = prefs.edit { putString(KEY_HOST, value) }
+
+    /** 当前配置的协议是否为 HTTPS。 */
+    val isHttps: Boolean
+        get() = serverHost?.startsWith("https://", ignoreCase = true) == true
+
+    /** 获取不含协议头的主机:端口（用于显示和历史记录）。 */
+    fun hostPort(): String = serverHost?.removePrefix("https://")?.removePrefix("http://") ?: ""
 
     val isConfigured: Boolean get() = !serverHost.isNullOrBlank()
 
@@ -34,23 +44,32 @@ class AppConfig(context: Context) {
      * 连接成功后去重置顶，最多保留 10 台设备。
      *
      * Deduplicates and promotes a successful connection, keeping at most 10 devices.
+     * @param fullHost 带协议的完整地址（如 https://example.com:8080）
      */
     @Synchronized
-    fun rememberServer(server: SavedServer) {
-        val hostPort = normalizeHost(server.hostPort) ?: return
+    fun rememberServer(fullHost: String, displayName: String = "") {
+        // normalizeHost 会保留协议前缀
+        val hostPort = normalizeHost(fullHost) ?: return
         val existing = readSavedServers().firstOrNull { it.hostPort == hostPort }
-        val incomingName = server.name.trim()
         val name = when {
-            incomingName.isNotEmpty() && incomingName != hostPort -> incomingName
+            displayName.isNotEmpty() && displayName != hostPort -> displayName
             existing != null -> existing.name
-            else -> hostPort
+            else -> hostPort  // 直接显示带协议的地址
         }
         val updated = buildList {
-            add(SavedServer(hostPort, name))
+            add(SavedServer(hostPort, name))  // 存带协议的地址到历史记录
             addAll(readSavedServers().filterNot { it.hostPort == hostPort })
         }.take(MAX_SAVED_SERVERS)
         writeSavedServers(updated)
         serverHost = hostPort
+    }
+
+    /**
+     * 兼容旧调用：传入 SavedServer。
+     */
+    @Synchronized
+    fun rememberServer(server: SavedServer) {
+        rememberServer(server.hostPort, server.name)
     }
 
     @Synchronized
@@ -62,15 +81,23 @@ class AppConfig(context: Context) {
         get() = prefs.getBoolean(KEY_MICROPHONE_MONITOR, true)
         set(value) = prefs.edit { putBoolean(KEY_MICROPHONE_MONITOR, value) }
 
-    /** WebSocket 地址：ws://host:port/ws?client_type=tv&client_token=xxx */
-    fun wsUrl(clientToken: String): String =
-        "ws://${serverHost}/ws?client_type=tv&client_token=$clientToken"
+    /** WebSocket 地址：ws(s)://host:port/ws?client_type=tv&client_token=xxx */
+    fun wsUrl(clientToken: String): String {
+        val protocol = if (isHttps) "wss" else "ws"
+        return "$protocol://${hostPort()}/ws?client_type=tv&client_token=$clientToken"
+    }
 
-    /** REST/资源基址：http://host:port/api */
-    fun apiBase(): String = "http://${serverHost}/api"
+    /** REST/资源基址：htp(s)://host:port/api */
+    fun apiBase(): String {
+        val protocol = if (isHttps) "https" else "http"
+        return "$protocol://${hostPort()}/api"
+    }
 
     /** H5 点歌地址（用于待机页二维码/明文兜底） */
-    fun h5Url(): String = "http://${serverHost}/m"
+    fun h5Url(): String {
+        val protocol = if (isHttps) "https" else "http"
+        return "$protocol://${hostPort()}/m"
+    }
 
     /** 稳定的设备 token（首次生成后固定），用于 WS client_token。 */
     val clientToken: String
@@ -111,15 +138,21 @@ class AppConfig(context: Context) {
         /**
          * 归一化用户输入：去空格、剥离 http(s):// 前缀与尾部斜杠；
          * 未带端口时补默认 8080；手动输入支持任意有效服务端端口。
+         * 保留协议头用于 HTTPS/WSS 支持。
          */
         fun normalizeHost(raw: String): String? {
             var s = raw.trim()
             if (s.isEmpty()) return null
+            val isHttps = s.startsWith("https://", ignoreCase = true)
             s = s.removePrefix("http://").removePrefix("https://")
             s = s.substringBefore("/")        // 去掉路径
             if (s.isEmpty()) return null
             if (!s.contains(":")) s = "$s:8080"
-            return s
+            return if (isHttps) "https://$s" else s
         }
+
+        /** 检测输入是否使用 HTTPS。 */
+        fun isHttps(raw: String): Boolean =
+            raw.trim().startsWith("https://", ignoreCase = true)
     }
 }
