@@ -47,25 +47,25 @@
             android:configChanges="orientation|screenSize|keyboardHidden|navigation|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTop"
-            android:theme="@style/Theme.HomeKtvTv" />
-
-        <activity
-            android:name=".ui.SetupActivity"
-            android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden|navigation|uiMode"
-            android:screenOrientation="landscape"
             android:theme="@style/Theme.HomeKtvTv">
             <!-- 普通启动器入口 -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Android TV / Leanback 启动器入口（详设§12.2） -->
+            <!-- Android TV / Leanback 启动器入口 -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.SetupActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|navigation|uiMode"
+            android:screenOrientation="landscape"
+            android:theme="@style/Theme.HomeKtvTv" />
 
         <receiver
             android:name=".BootReceiver"

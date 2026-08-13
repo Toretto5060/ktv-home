@@ -4,6 +4,7 @@ import com.homektv.library.SettingService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import jakarta.servlet.http.HttpServletRequest;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -98,6 +99,86 @@ public class ServerAddressService {
      */
     public String h5Url(String room, String requestHost, int requestPort) {
         return "http://" + hostPort(requestHost, requestPort) + "/m?room=" + room;
+    }
+
+    /**
+     * H5 点歌地址：从当前 HTTP 请求的转发头或 Host 头解析外部访问地址。
+     * 用于 QR 接口在反向代理/容器化部署下，默认值不能依赖 request.getServerName()（容器内网地址）。
+     * <p>
+     * H5 song-request URL resolved from forwarded headers / Host header.
+     * Used by the QR endpoint when no explicit base_url is supplied — under
+     * reverse proxies / containers request.getServerName() returns the upstream
+     * LAN address, which would produce a wrong QR.
+     * @param room    the room identifier
+     * @param request the HTTP request
+     * @return the full H5 URL
+     */
+    public String h5Url(String room, HttpServletRequest request) {
+        String manual = manualAddress();
+        if (manual != null) return "http://" + manual + "/m?room=" + room;
+
+        // 1) X-Forwarded-Host（多代理时取第一个）+ X-Forwarded-Port + X-Forwarded-Proto
+        String fwdHost = firstHeader(request, "X-Forwarded-Host");
+        String fwdProto = firstHeader(request, "X-Forwarded-Proto");
+        int port = parsePort(firstHeader(request, "X-Forwarded-Port"), serverPort);
+        // 2) Host 头（带或不带端口）
+        String hostHeader = firstHeader(request, "Host");
+
+        String host = fwdHost != null ? fwdHost : hostHeader;
+        if (host != null && !host.isBlank()
+                && !"localhost".equalsIgnoreCase(host)
+                && !host.startsWith("127.")) {
+            String hostOnly = host;
+            int hostPort = port;
+            // 解析 host:port（IPv4 / DNS），不做 IPv6 复杂解析
+            int colon = hostOnly.lastIndexOf(':');
+            if (colon > 0 && hostOnly.indexOf(':') == hostOnly.lastIndexOf(':') && hostOnly.charAt(0) != '[') {
+                try {
+                    hostPort = Integer.parseInt(hostOnly.substring(colon + 1));
+                    hostOnly = hostOnly.substring(0, colon);
+                } catch (NumberFormatException ignored) {
+                }
+            } else {
+                hostPort = hostPort > 0 ? hostPort : request.getServerPort();
+            }
+            String scheme = (fwdProto != null && !fwdProto.isBlank()) ? fwdProto : request.getScheme();
+            return scheme + "://" + hostOnly + ":" + hostPort + "/m?room=" + room;
+        }
+
+        // 3) 用 serverPort / serverName 兜底
+        return "http://" + hostPort() + "/m?room=" + room;
+    }
+
+    private static String firstHeader(HttpServletRequest req, String name) {
+        String v = req.getHeader(name);
+        if (v == null || v.isBlank()) return null;
+        // X-Forwarded-Host: h1, h2  — 取第一个
+        int comma = v.indexOf(',');
+        return (comma >= 0 ? v.substring(0, comma) : v).trim();
+    }
+
+    private static int parsePort(String raw, int fallback) {
+        if (raw == null || raw.isBlank()) return fallback;
+        try { return Integer.parseInt(raw.trim()); } catch (NumberFormatException e) { return fallback; }
+    }
+
+    /**
+     * H5 点歌地址，由 TV 端传入当前连接的 base（H5 入口 URL）。扫码地址与 TV
+     * 当前连接保持一致——TV 配内网地址就扫内网，配公网地址就扫公网，无需后端感知。
+     * <p>
+     * H5 song-request URL built from a TV-supplied base. Keeps the scanned address
+     * in sync with whatever the TV is currently connected to (LAN or public).
+     * @param room    the room identifier
+     * @param baseUrl the H5 entry URL (protocol + host + port + /m)
+     * @return the full H5 URL with room query
+     */
+    public String h5Url(String room, String baseUrl) {
+        String base = baseUrl.trim();
+        int q = base.indexOf('?');
+        if (q >= 0) base = base.substring(0, q);
+        if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        if (!base.endsWith("/m")) base = base + "/m";
+        return base + "?room=" + room;
     }
 
     private String manualAddress() {

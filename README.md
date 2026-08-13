@@ -26,10 +26,11 @@ docker buildx create --use
 docker buildx inspect --bootstrap
 # 2. 开启 docker manifest 创建多架构镜像清单
 docker buildx build \
+  --progress=plain \
   --platform linux/amd64,linux/arm64 \
-  --build-arg KTV_RELEASE_VERSION=0.1.0 \
-  --build-arg KTV_RELEASE_VERSION_CODE=1 \
-  -t toretto5060/ktv-home:0.1.0 \
+  --build-arg KTV_RELEASE_VERSION=0.1.2 \
+  --build-arg KTV_RELEASE_VERSION_CODE=3 \
+  -t toretto5060/ktv-home:0.1.2 \
   -t toretto5060/ktv-home:latest \
   --push \
   -f backend/Dockerfile \
@@ -37,6 +38,12 @@ docker buildx build \
 这一步会同时编译 amd64 和 arm64 两个镜像并一起推送，耗时较长（15~30 分钟），但镜像在所有平台上都能原生运行。
 
 
+# 本地构建 Debug APK 需要 JDK 17 和 Android SDK：
+
+```bash
+cd android-tv
+./gradlew testDebugUnitTest assembleDebug
+```
 
 ## 界面预览
 

@@ -103,7 +103,7 @@ class LanScanner {
     }
 
     companion object {
-        private const val PROBE_TIMEOUT_MS = 300L
+        private const val PROBE_TIMEOUT_MS = 1500L
         private const val MAX_CONCURRENT_PROBES = 64
         internal val CANDIDATE_PORTS = listOf(8080, 80, 8000, 8081, 8090, 8888, 9000, 9090)
     }

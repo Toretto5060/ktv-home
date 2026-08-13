@@ -7,10 +7,10 @@ plugins {
 val media3 = "1.4.1"
 val ffmpegAar = layout.projectDirectory.file("libs/media3-decoder-ffmpeg.aar").asFile
 val tvVersionName = providers.environmentVariable("KTV_TV_VERSION_NAME")
-    .orElse("0.1.0")
+    .orElse("0.1.1")
 val tvVersionCode = providers.environmentVariable("KTV_TV_VERSION_CODE")
     .map { value -> value.toIntOrNull() ?: throw GradleException("KTV_TV_VERSION_CODE must be an integer") }
-    .orElse(1)
+    .orElse(2)
 
 if (!ffmpegAar.isFile) {
     throw GradleException(

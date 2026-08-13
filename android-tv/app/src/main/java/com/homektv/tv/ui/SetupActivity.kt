@@ -140,7 +140,7 @@ class SetupActivity : AppCompatActivity() {
         row.findViewById<TextView>(R.id.txtHistoryAddress).text = server.hostPort
         row.findViewById<Button>(R.id.btnHistoryConnect).apply {
             id = View.generateViewId()
-            setOnClickListener { connect(server) }
+            setOnClickListener { connect(server, this) }
         }
         row.findViewById<Button>(R.id.btnHistoryDelete).apply {
             id = View.generateViewId()
@@ -164,7 +164,7 @@ class SetupActivity : AppCompatActivity() {
         row.findViewById<TextView>(R.id.txtLanAddress).text = server.hostPort
         row.findViewById<Button>(R.id.btnLanConnect).apply {
             id = View.generateViewId()
-            setOnClickListener { connect(SavedServer(server.hostPort, server.name)) }
+            setOnClickListener { connect(SavedServer(server.hostPort, server.name), this) }
         }
         binding.lanContainer.addView(row)
         rebuildFocusChain()
@@ -179,33 +179,49 @@ class SetupActivity : AppCompatActivity() {
         }
         // 存储带协议的完整地址用于 API 调用
         config.serverHost = host
-        val displayHost = host.removePrefix("https://").removePrefix("http://")
-        verifyAndConnect(SavedServer(displayHost, displayHost), binding.btnConnect)
+        // verifyAndConnect 现在按 server.hostPort 决定目标地址，
+        // 所以这里必须把带协议的 host 传下去，不能剥掉。
+        // <p>verifyAndConnect uses server.hostPort as the target now — pass
+        // the scheme-prefixed host through, don't strip it.
+        verifyAndConnect(SavedServer(host, host), binding.btnConnect)
     }
 
-    private fun connect(server: SavedServer) {
-        val focusedButton = currentFocus as? Button ?: binding.btnRefresh
-        verifyAndConnect(server, focusedButton)
+    private fun connect(server: SavedServer, connectButton: Button) {
+        verifyAndConnect(server, connectButton)
     }
 
     private fun verifyAndConnect(server: SavedServer, button: Button) {
         button.isEnabled = false
-        // 优先用 config.serverHost（有协议前缀），没有则用 server.hostPort + 默认 http
-        val hostToValidate = config.serverHost
-            ?: if (server.hostPort.startsWith("https://", ignoreCase = true)) server.hostPort
-               else "http://${server.hostPort}"
+        binding.validatingOverlay.visibility = View.VISIBLE
+        binding.txtValidatingHost.text = server.hostPort
+        // 始终用当前被点选的 server 决定目标地址，忽略 config.serverHost
+        // （后者保留的是上次连接的地址，可能跟当前点选不同 —— 比如
+        // 用户先用 LAN IP 连过，后来从历史选了公网域名；如果以旧的 LAN IP
+        // 验证通过并写回 prefs，会导致 MainActivity 的 h5Url 用旧地址、扫码出错）。
+        // <p>Always use the tapped server for the target address — config.serverHost
+        // holds the previous connection and may differ from this tap (e.g. user
+        // tapped a public-domain entry after a LAN-IP session; validating and
+        // persisting the old LAN IP would make MainActivity's h5Url/QR wrong).
+        val hostToValidate: String = when {
+            server.hostPort.startsWith("https://", ignoreCase = true) -> server.hostPort
+            server.hostPort.startsWith("http://", ignoreCase = true) -> server.hostPort
+            server.hostPort.contains("://") -> server.hostPort
+            else -> "http://${server.hostPort}"
+        }
         binding.txtScanStatus.text = getString(R.string.setup_verifying, server.hostPort)
         lifecycleScope.launch {
             if (scanner.validate(hostToValidate)) {
-                // 用 config.serverHost 存入历史记录，而不是 server.hostPort（无协议）
+                // 用当前点选的目标地址持久化 serverHost，避免被旧值覆盖
                 config.rememberServer(hostToValidate, server.name)
                 startActivity(Intent(this@SetupActivity, MainActivity::class.java))
                 finish()
             } else {
+                binding.validatingOverlay.visibility = View.GONE
                 button.isEnabled = true
                 Toast.makeText(this@SetupActivity, R.string.setup_invalid, Toast.LENGTH_LONG).show()
                 binding.txtScanStatus.setText(R.string.setup_scan_idle)
-                button.requestFocus()
+                // 失败后焦点移到连接按钮，避免误删
+                binding.btnConnect.requestFocus()
             }
         }
     }

@@ -40,6 +40,8 @@ class KtvSocket(
         fun onToast(text: String) {}
         /** 连接状态变化：true=已连上并完成一次同步，false=断开/重连中。 */
         fun onConnectionChanged(connected: Boolean) {}
+        /** 首次连接失败回调（不触发重连，用于跳转到连接页）。 */
+        fun onConnectionFailed() {}
     }
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -54,6 +56,7 @@ class KtvSocket(
     private var ws: WebSocket? = null
     private var closed = false
     private var attempt = 0
+    private var initialConnectionFailed = false  // 首次连接是否已失败
 
     // 15s 应用层心跳
     private val heartbeat = object : Runnable {
@@ -131,6 +134,11 @@ class KtvSocket(
             main.post {
                 main.removeCallbacks(heartbeat)
                 listener.onConnectionChanged(false)
+                // 首次连接失败时通知
+                if (attempt == 0 && !initialConnectionFailed) {
+                    initialConnectionFailed = true
+                    listener.onConnectionFailed()
+                }
             }
             scheduleReconnect()
         }
@@ -139,6 +147,11 @@ class KtvSocket(
             main.post {
                 main.removeCallbacks(heartbeat)
                 listener.onConnectionChanged(false)
+                // 首次连接失败时通知
+                if (attempt == 0 && !initialConnectionFailed) {
+                    initialConnectionFailed = true
+                    listener.onConnectionFailed()
+                }
             }
             scheduleReconnect()
         }

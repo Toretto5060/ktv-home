@@ -28,6 +28,10 @@ class AppConfig(context: Context) {
         get() = prefs.getString(KEY_HOST, null)
         set(value) = prefs.edit { putString(KEY_HOST, value) }
 
+    fun clearServerHost() {
+        prefs.edit { remove(KEY_HOST) }
+    }
+
     /** 当前配置的协议是否为 HTTPS。 */
     val isHttps: Boolean
         get() = serverHost?.startsWith("https://", ignoreCase = true) == true

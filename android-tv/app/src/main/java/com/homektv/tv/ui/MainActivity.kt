@@ -16,11 +16,13 @@ import android.view.WindowManager
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.KeyEvent
 import android.widget.Toast
+import android.widget.Button
 import android.widget.TextView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.FrameLayout
 import android.view.Gravity
+import android.view.ViewGroup
 import androidx.annotation.OptIn
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -119,6 +121,8 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     private val standbyMotionAnimators = mutableListOf<ObjectAnimator>()
     private var currentPlaybackState = "idle"
     private var hasCurrentSong = false
+    private var isFinishing = false
+    private var connectionFailed = false
     private val standbyTicker = object : Runnable {
         override fun run() {
             if (standbyCarouselEnabled && recommendations.isNotEmpty()) {
@@ -154,17 +158,35 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         val audioPreview = intent.action == "com.homektv.tv.action.AUDIO_PREVIEW" ||
             intent.getBooleanExtra("audio_preview", false)
 
-        if (!config.isConfigured && !audioPreview) {
-            startActivity(Intent(this, SetupActivity::class.java))
-            finish()
-            return
-        }
-
-        // 永不休眠（详设§12.2：点歌机常亮）
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        if (!audioPreview) {
+            // 兜底：如果 serverHost 为空但有历史记录，用第一个
+            if (config.serverHost.isNullOrBlank()) {
+                config.savedServers.firstOrNull()?.let { server ->
+                    val host = server.hostPort
+                    if (host.contains("://")) {
+                        config.serverHost = host
+                    }
+                }
+            }
+            val sh = config.serverHost
+            if (sh.isNullOrBlank() || !sh.contains("://")) {
+                startActivity(Intent(this, SetupActivity::class.java))
+                finish()
+                return
+            }
+            binding.validatingOverlay.visibility = View.VISIBLE
+            binding.txtValidatingHost.text = getString(R.string.setup_verifying_server)
+        }
+
+        onMainReady(audioPreview)
+    }
+
+    private fun onMainReady(audioPreview: Boolean) {
         clock.post(clockTick)
 
         binding.txtAddress.text = config.h5Url()
@@ -213,11 +235,25 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         }
 
         setupRemoteMenu()
+        // 根据屏幕高度调整待机页字体大小
+        binding.standbyPanel.post { adjustTextSizesForScreen() }
         if (audioPreview) {
             renderAudioPreview()
         } else {
+            // 有 serverHost 才会连接；连接失败由 onConnectionChanged 处理跳转
             socket = KtvSocket(config, this).also { it.connect() }
+            // 连接超时：15秒未连接成功则跳转 SetupActivity
+            binding.root.postDelayed(connectionTimeoutRunnable, 15_000L)
             if (config.microphoneMonitorEnabled) ensureMicrophonePermissionsAndStart()
+        }
+    }
+
+    // 用于取消连接超时定时器
+    private val connectionTimeoutRunnable = Runnable {
+        if (!connectionFailed && socket != null) {
+            Toast.makeText(this, "连接服务器超时", Toast.LENGTH_SHORT).show()
+            startActivity(Intent(this, SetupActivity::class.java))
+            finish()
         }
     }
 
@@ -236,7 +272,108 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         binding.txtAudioDuration.text = "04:03"
     }
 
+    /** 根据屏幕宽度动态调整待机页文字大小，确保横屏时内容完整显示 */
+    private fun adjustTextSizesForScreen() {
+        val displayMetrics = resources.displayMetrics
+        val screenHeight = displayMetrics.heightPixels / displayMetrics.density
+
+        // 横屏模式下，如果高度不足基准值进行缩放
+        val baseHeight = 450f
+        if (screenHeight < baseHeight) {
+            // 使用更平缓的缩放曲线，最小缩放到 0.85
+            val rawScale = screenHeight / baseHeight
+            val scale = 0.85f + (rawScale * 0.15f)
+            if (rawScale < 1f) {
+                // 顶部 Logo - 只轻微缩小
+                binding.imgStandbyLogo?.let {
+                    val lp = it.layoutParams
+                    lp.width = (64 * scale).toInt()
+                    lp.height = (48 * scale).toInt()
+                    it.layoutParams = lp
+                }
+                // 品牌名称
+                binding.txtBrandName?.let {
+                    (it as? TextView)?.textSize = 31f * scale
+                }
+                // 切换按钮
+                binding.btnExitServer?.let {
+                    (it as? Button)?.textSize = 14f * scale
+                }
+                // 顶部信息栏
+                binding.txtPhones?.let {
+                    (it as? TextView)?.textSize = 18f * scale
+                }
+                binding.txtClock?.let {
+                    (it as? TextView)?.textSize = 24f * scale
+                }
+                binding.txtStatus?.let {
+                    (it as? TextView)?.textSize = 18f * scale
+                }
+                // 排队中文字
+                binding.txtQueueCount?.let {
+                    (it as? TextView)?.textSize = 15f * scale
+                }
+                // 主标题 "今晚开唱" - 适中大小
+                binding.txtStandbyWelcome.textSize = 48f
+                // 副标题
+                binding.txtStandbySubtitle?.let {
+                    (it as? TextView)?.textSize = 20f * scale
+                }
+                // 统计信息
+                listOf(binding.txtLibraryStat, binding.txtPlayedStat).forEach {
+                    (it as? TextView)?.textSize = 15f * scale
+                }
+                // 二维码面板 - 二维码图片缩小更多
+                binding.qrPanel?.let { panel ->
+                    if (panel is ViewGroup) {
+                        val vg = panel
+                        for (i in 0 until vg.childCount) {
+                            val child = vg.getChildAt(i)
+                            when (child) {
+                                is ImageView -> {
+                                    val lp = child.layoutParams
+                                    lp.width = (lp.width * scale * 0.85f).toInt()
+                                    lp.height = (lp.height * scale * 0.85f).toInt()
+                                    child.layoutParams = lp
+                                }
+                                is TextView -> {
+                                    // 二维码上方文字（"扫码点歌"、"微信扫一扫"）缩小更多
+                                    val id = child.id
+                                    if (id == R.id.qrTitle) {
+                                        child.textSize = 17f * scale
+                                    } else {
+                                        child.textSize = 10f * scale
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 底部推荐歌单
+                binding.recommendationRow?.let { row ->
+                    row.layoutParams = row.layoutParams.apply {
+                        height = (58 * scale).toInt()
+                    }
+                }
+                // 底部播放栏 - 专辑封面
+                binding.imgAudioCover?.let {
+                    val lp = it.layoutParams
+                    lp.height = (lp.height * scale).toInt()
+                    it.layoutParams = lp
+                }
+                // 底部播放栏 - 歌名
+                binding.txtAudioTitle?.let {
+                    (it as? TextView)?.textSize = 30f * scale
+                }
+                binding.txtAudioArtist?.let {
+                    (it as? TextView)?.textSize = 19f * scale
+                }
+            }
+        }
+    }
+
     override fun onDestroy() {
+        isFinishing = true
         standbyMotionAnimators.forEach(ObjectAnimator::cancel)
         standbyMotionAnimators.clear()
         socket?.close()
@@ -281,25 +418,43 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             binding.queueOverlay.visibility = View.GONE
             return true
         }
-        // 原/伴唱选择栏：BACK 收起；可见期间方向键/确认键交给焦点系统（移动选择、点击生效）
+        // 原/伴唱选择栏：BACK 收起；左右键确保焦点在面板内
         if (binding.vocalPanel.visibility == View.VISIBLE && event.action == KeyEvent.ACTION_DOWN) {
-            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-                hideVocalPanel()
-                return true
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_BACK -> {
+                    hideVocalPanel()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (binding.btnVocalAccompaniment.hasFocus()) {
+                        binding.btnVocalOriginal.requestFocus()
+                        return true
+                    }
+                }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (binding.btnVocalOriginal.hasFocus()) {
+                        binding.btnVocalAccompaniment.requestFocus()
+                        return true
+                    }
+                }
             }
             resetVocalTimer()
             return super.dispatchKeyEvent(event)
         }
         if (event.action == KeyEvent.ACTION_DOWN) {
+            // 待机页按 BACK：双击退出程序
+            if (event.keyCode == KeyEvent.KEYCODE_BACK && binding.playerView.visibility != View.VISIBLE) {
+                val now = System.currentTimeMillis()
+                if (now - lastBackAt < 2000) {
+                    isFinishing = true
+                    finish()
+                } else {
+                    lastBackAt = now
+                    Toast.makeText(this, R.string.back_exit_hint, Toast.LENGTH_SHORT).show()
+                }
+                return true
+            }
             when (event.keyCode) {
-                KeyEvent.KEYCODE_VOLUME_UP -> {
-                    changeVolume(10)
-                    return true
-                }
-                KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    changeVolume(-10)
-                    return true
-                }
                 KeyEvent.KEYCODE_VOLUME_MUTE, KeyEvent.KEYCODE_MUTE -> {
                     sendControl("mute", "{\"muted\":${!currentMuted}}")
                     return true
@@ -307,11 +462,6 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             }
             if (binding.remoteMenu.visibility != View.VISIBLE && binding.queueOverlay.visibility != View.VISIBLE) {
                 when (event.keyCode) {
-                    // 确认键：屏幕下方弹出原唱/伴唱选择栏（参考主流 KTV 交互）
-                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        showVocalPanel()
-                        return true
-                    }
                     KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
                         togglePlayback()
                         return true
@@ -325,12 +475,20 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                         sendControl("next")
                         return true
                     }
+                    // 待机页：上键聚焦切换按钮
                     KeyEvent.KEYCODE_DPAD_UP -> {
-                        changeVolume(5)
+                        if (binding.standbyPanel.visibility == View.VISIBLE) {
+                            binding.btnExitServer.requestFocus()
+                        }
                         return true
                     }
-                    KeyEvent.KEYCODE_DPAD_DOWN -> {
-                        changeVolume(-5)
+                    // 待机页切换按钮上按确认键：断开连接并跳转
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        if (binding.standbyPanel.visibility == View.VISIBLE && binding.btnExitServer.hasFocus()) {
+                            exitServer()
+                            return true
+                        }
+                        showVocalPanel()
                         return true
                     }
                 }
@@ -354,17 +512,34 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
 
     // ---- 原唱/伴唱选择栏 ----
 
-    private val vocalHide = Runnable { binding.vocalPanel.visibility = View.GONE }
+    private val vocalHide = Runnable {
+        binding.vocalPanel.visibility = View.GONE
+        // 弹窗关闭后，焦点归还主视图
+        if (binding.standbyPanel.visibility == View.VISIBLE) {
+            binding.standbyContent.requestFocus()
+        }
+    }
 
     private fun showVocalPanel() {
         updateVocalPanelSelection()
         binding.vocalPanel.visibility = View.VISIBLE
         (if (currentVocalMode == "original") binding.btnVocalOriginal else binding.btnVocalAccompaniment).requestFocus()
         resetVocalTimer()
+        // 弹窗显示时，监听切换按钮焦点，防止意外获得焦点
+        binding.btnExitServer.onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
+            if (hasFocus && binding.vocalPanel.visibility == View.VISIBLE) {
+                (if (currentVocalMode == "original") binding.btnVocalOriginal else binding.btnVocalAccompaniment).requestFocus()
+            }
+        }
     }
 
     private fun hideVocalPanel() {
         binding.vocalPanel.visibility = View.GONE
+        binding.btnExitServer.onFocusChangeListener = null
+        // 弹窗关闭后，焦点归还主视图
+        if (binding.standbyPanel.visibility == View.VISIBLE) {
+            binding.standbyContent.requestFocus()
+        }
     }
 
     private fun resetVocalTimer() {
@@ -391,6 +566,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         binding.remoteMute.setOnClickListener { sendControl("mute", "{\"muted\":${!currentMuted}}") }
         binding.remoteQueue.setOnClickListener { showQueueOverlay() }
         binding.remoteMicrophone.setOnClickListener { toggleMicrophoneMonitor() }
+        binding.btnExitServer.setOnClickListener { exitServer() }
         updateMicrophoneButton()
         binding.queueClose.setOnClickListener { binding.queueOverlay.visibility = View.GONE }
         binding.btnVocalOriginal.setOnClickListener {
@@ -501,10 +677,57 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     // ---- KtvSocket.Listener ----
 
     override fun onConnectionChanged(connected: Boolean) {
-        binding.txtStatus.setText(
-            if (connected) R.string.status_connected else R.string.status_connecting
-        )
-        if (connected) checkForTvUpdate()
+        if (connected) {
+            connectionFailed = false
+            // 连接成功，取消超时定时器
+            binding.root.removeCallbacks(connectionTimeoutRunnable)
+            binding.validatingOverlay.tag = null  // 重置防抖标记
+            binding.txtStatus.setText(R.string.status_connected)
+            // 蒙版在连接成功后消失，让用户看到待机页内容
+            binding.validatingOverlay.visibility = View.GONE
+            checkForTvUpdate()
+        } else {
+            binding.txtStatus.setText(R.string.status_connecting)
+        }
+        // 退出按钮在待机页始终可见
+        if (binding.standbyPanel.visibility == View.VISIBLE) {
+            binding.btnExitServer.visibility = View.VISIBLE
+        }
+    }
+
+    private fun exitServer() {
+        AlertDialog.Builder(this)
+            .setTitle("退出服务器")
+            .setMessage("确定退出当前服务器吗？")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("确定") { _, _ ->
+                socket?.close()
+                // 不清除 serverHost，下次打开会自动连接
+                startActivity(Intent(this, SetupActivity::class.java))
+                finish()
+            }
+            .show()
+    }
+
+    override fun onConnectionFailed() {
+        if (isFinishing) return
+        // 防抖：如果正在显示失败蒙版，不再重复触发
+        if (binding.validatingOverlay.tag == "failed") return
+        binding.validatingOverlay.tag = "failed"
+
+        runOnUiThread {
+            if (isFinishing) return@runOnUiThread
+            connectionFailed = true
+            binding.validatingOverlay.visibility = View.VISIBLE
+            // 显示 1.5s 后跳转
+            binding.validatingOverlay.postDelayed({
+                if (!isFinishing && connectionFailed) {
+                    Toast.makeText(this, "连接服务器失败", Toast.LENGTH_SHORT).show()
+                    startActivity(Intent(this, SetupActivity::class.java))
+                    finish()
+                }
+            }, 1500L)
+        }
     }
 
     private fun checkForTvUpdate() {
@@ -795,6 +1018,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 binding.imgQr.visibility = View.VISIBLE
                 binding.txtQrPlaceholder.visibility = View.GONE
             }
+            // 失败时保持 "二维码加载中…" 占位文字可见（fetchQr 已记 log）。
         }
     }
 

@@ -185,21 +185,48 @@ class MediaApi(private val config: AppConfig) {
     /** 拉流地址：http://host/api/stream/{fileId} */
     fun streamUrl(fileId: Long): String = "${config.apiBase()}/stream/$fileId"
 
-    /** 二维码地址：http://host/api/qr?size=xxx（P1.30 待机页扫码引导） */
-    fun qrUrl(size: Int): String = "${config.apiBase()}/qr?size=$size"
+    /**
+     * 二维码地址：http://host/api/qr?size=xxx&content=xxx（P1.30 待机页扫码引导）。
+     * TV 端直接拼好扫码内容（h5Url + "?room=default"），后端只负责 ZXing 编码，不做任何覆盖。
+     * 这样 TV 端用自己"已知对外可达"的 URL 拼内容，扫码结果严格跟 TV 当前连接一致 —— 不依赖任何反代/Host 头兜底。
+     * <p>
+     * QR endpoint. The TV composes the full scanned string (h5Url + "?room=default")
+     * and the backend only ZXing-encodes it without altering the value. The TV uses
+     * whatever URL it already knows is reachable for the phone, independent of any
+     * reverse proxy / Host header.
+     */
+    fun qrUrl(size: Int): String {
+        val h5 = config.h5Url()
+        // 没配 serverHost 时，h5 形如 "http:///m"。传给后端意义不大，跳过 content，
+        // 让后端走 base_url fallback（旧链路）或干脆 400 而不是吐出坏码。
+        // <p>When serverHost is unconfigured, h5 looks like "http:///m" — sending it
+        // would encode a broken URL. Skip content so the backend falls back to its
+        // legacy base_url/host path (or 400s) rather than producing a bad QR.
+        if (config.serverHost.isNullOrBlank() || h5.contains(":///")) {
+            return "${config.apiBase()}/qr?size=$size"
+        }
+        // content 走 base_url 同一套 room 逻辑；这里直接拼完整字符串更稳：
+        // 后端不再"在末尾 +?room"，不会再出错。
+        // <p>Compose the full string here so the backend can't accidentally append
+        // ?room twice or rewrite the URL.
+        val content = "$h5?room=default"
+        val encoded = java.net.URLEncoder.encode(content, "UTF-8")
+        return "${config.apiBase()}/qr?size=$size&content=$encoded"
+    }
 
     /** 拉取二维码 PNG 字节；失败返回 null。 */
     suspend fun fetchQr(size: Int): ByteArray? = withContext(Dispatchers.IO) {
+        val url = qrUrl(size)
         try {
-            http.newCall(Request.Builder().url(qrUrl(size)).build()).execute().use { resp ->
+            http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    Log.w(TAG, "qr http ${resp.code}")
+                    Log.w(TAG, "qr http ${resp.code} url=$url")
                     return@withContext null
                 }
                 resp.body?.bytes()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "qr fetch failed: ${e.message}")
+            Log.w(TAG, "qr fetch failed: ${e.message} url=$url")
             null
         }
     }

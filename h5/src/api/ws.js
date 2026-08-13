@@ -68,7 +68,7 @@ export class KtvSocket {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     // 开发环境由 Vite 代理 /ws 请求；生产环境同源直连
     // Dev: Vite proxies /ws requests; production: same-origin direct connection
-    const url = `${proto}://${location.host}/ws`
+    const url = `${proto}://${location.host}/ws?client_type=h5`
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
