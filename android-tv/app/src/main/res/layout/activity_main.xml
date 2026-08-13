@@ -16,6 +16,8 @@
         android:layout_height="match_parent"
         android:background="@drawable/standby_background"
         android:orientation="vertical"
+        android:clipChildren="false"
+        android:clipToPadding="false"
         android:paddingHorizontal="64dp"
         android:paddingVertical="28dp">
 
@@ -90,14 +92,17 @@
             android:focusable="true"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:paddingHorizontal="36dp"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:paddingHorizontal="24dp"
             android:paddingVertical="12dp">
 
             <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1.15"
-                android:orientation="vertical">
+                android:orientation="vertical"
+                android:layout_marginEnd="24dp">
 
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:background="@drawable/karaoke_label" android:paddingHorizontal="14dp" android:paddingVertical="6dp" android:text="家庭欢唱模式" android:textColor="@android:color/white" android:textSize="14sp" android:textStyle="bold" />
 
@@ -144,18 +149,19 @@
                 android:clipToPadding="false"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:padding="20dp">
+                android:paddingVertical="12dp"
+                android:paddingHorizontal="1dp">
 
             <TextView android:id="@+id/qrTitle" android:layout_width="wrap_content" android:layout_height="26dp" android:gravity="center" android:includeFontPadding="true" android:text="扫码点歌" android:textColor="@android:color/white" android:textSize="17sp" android:textStyle="bold" />
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="微信扫一扫，即刻加入这场欢唱" android:textColor="@color/dim" android:textSize="10sp" />
 
             <!-- 二维码（P1.30 接 /api/qr）：加载前显示占位文字，加载成功显示真图 -->
             <FrameLayout
-                android:layout_width="220dp"
-                android:layout_height="220dp"
+                android:layout_width="180dp"
+                android:layout_height="180dp"
                 android:layout_marginTop="14dp"
                 android:background="@drawable/qr_frame"
-                android:padding="14dp">
+                android:padding="8dp">
                 <TextView
                     android:id="@+id/txtQrPlaceholder"
                     android:layout_width="match_parent"
@@ -172,14 +178,6 @@
                     android:contentDescription="@string/qr_desc"
                     android:scaleType="fitCenter" />
             </FrameLayout>
-
-            <TextView
-                android:id="@+id/txtAddress"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:textColor="@color/dim"
-                android:textSize="13sp" />
             </LinearLayout>
         </LinearLayout>
 

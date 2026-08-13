@@ -189,8 +189,6 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     private fun onMainReady(audioPreview: Boolean) {
         clock.post(clockTick)
 
-        binding.txtAddress.text = config.h5Url()
-
         mediaApi = MediaApi(config)
         loadQr()
         loadStandbyContent()
@@ -983,6 +981,8 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
 
     private fun startStandbyMotion() {
         binding.qrPanel.post {
+            // 使用硬件层加速，避免每帧重绘导致的卡顿
+            binding.qrPanel.setLayerType(View.LAYER_TYPE_HARDWARE, null)
             ObjectAnimator.ofFloat(binding.qrPanel, View.SCALE_X, 1f, 1.012f).apply {
                 duration = 1_800L
                 repeatCount = ObjectAnimator.INFINITE

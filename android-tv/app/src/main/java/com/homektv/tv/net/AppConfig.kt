@@ -140,8 +140,8 @@ class AppConfig(context: Context) {
         private const val MAX_SAVED_SERVERS = 10
 
         /**
-         * 归一化用户输入：去空格、剥离 http(s):// 前缀与尾部斜杠；
-         * 未带端口时补默认 8080；手动输入支持任意有效服务端端口。
+         * 归一化用户输入：去空格、剥离 http(s):// 前缀与尾部斜杠。
+         * 如果用户没有输入端口，保持原样（让配置的端口生效）。
          * 保留协议头用于 HTTPS/WSS 支持。
          */
         fun normalizeHost(raw: String): String? {
@@ -151,7 +151,7 @@ class AppConfig(context: Context) {
             s = s.removePrefix("http://").removePrefix("https://")
             s = s.substringBefore("/")        // 去掉路径
             if (s.isEmpty()) return null
-            if (!s.contains(":")) s = "$s:8080"
+            // 不再默认添加端口，保持用户输入的原样
             return if (isHttps) "https://$s" else s
         }
 
