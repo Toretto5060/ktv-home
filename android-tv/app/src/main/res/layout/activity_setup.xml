@@ -38,7 +38,7 @@
                 android:id="@+id/txtScanStatus"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="正在检查上次连接"
+                android:text=""
                 android:textColor="@color/dim"
                 android:textSize="15sp" />
         </LinearLayout>

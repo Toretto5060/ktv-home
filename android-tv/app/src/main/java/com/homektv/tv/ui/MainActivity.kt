@@ -242,7 +242,6 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             socket = KtvSocket(config, this).also { it.connect() }
             // 连接超时：15秒未连接成功则跳转 SetupActivity
             binding.root.postDelayed(connectionTimeoutRunnable, 15_000L)
-            if (config.microphoneMonitorEnabled) ensureMicrophonePermissionsAndStart()
         }
     }
 
@@ -399,6 +398,14 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN && binding.playerView.visibility == View.VISIBLE) {
             showPlaybackProgress()
+        }
+        // 验证蒙版显示时，按返回键取消连接并跳转 SetupActivity
+        if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_BACK &&
+            binding.validatingOverlay.visibility == View.VISIBLE) {
+            socket?.close()
+            startActivity(android.content.Intent(this, SetupActivity::class.java))
+            finish()
+            return true
         }
         if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_MENU) {
             hideVocalPanel()
@@ -745,10 +752,12 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 Build.SUPPORTED_ABIS.contains("armeabi-v7a") -> release.tv.armeabiV7a
                 else -> null
             }
-            if (apk == null || !apk.available || apk.url.isBlank()) {
-                onToast("服务端版本为 ${release.version}，但没有适配本机架构的安装包")
-                return@launch
-            }
+            // TODO: 暂时注释掉版本不匹配的提示
+            // if (apk == null || !apk.available || apk.url.isBlank()) {
+            //     onToast("服务端版本为 ${release.version}，但没有适配本机架构的安装包")
+            //     return@launch
+            // }
+            if (apk == null || !apk.available || apk.url.isBlank()) return@launch
             promptedReleaseVersion = releaseKey
             showUpdateDialog(release.version, apk)
         }

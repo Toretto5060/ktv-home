@@ -4,6 +4,7 @@ import android.animation.ObjectAnimator
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.content.Intent
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -38,6 +39,8 @@ class SetupActivity : AppCompatActivity() {
     private val scanner = LanScanner()
     private val discovered = linkedMapOf<String, DiscoveredServer>()
     private var scanJob: Job? = null
+    private var validationJob: Job? = null
+    private var currentValidationButton: Button? = null
     private val rhythmAnimators = mutableListOf<ObjectAnimator>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -191,6 +194,7 @@ class SetupActivity : AppCompatActivity() {
     }
 
     private fun verifyAndConnect(server: SavedServer, button: Button) {
+        currentValidationButton = button
         button.isEnabled = false
         binding.validatingOverlay.visibility = View.VISIBLE
         binding.txtValidatingHost.text = server.hostPort
@@ -209,7 +213,7 @@ class SetupActivity : AppCompatActivity() {
             else -> "http://${server.hostPort}"
         }
         binding.txtScanStatus.text = getString(R.string.setup_verifying, server.hostPort)
-        lifecycleScope.launch {
+        validationJob = lifecycleScope.launch {
             if (scanner.validate(hostToValidate)) {
                 // 用当前点选的目标地址持久化 serverHost，避免被旧值覆盖
                 config.rememberServer(hostToValidate, server.name)
@@ -218,10 +222,9 @@ class SetupActivity : AppCompatActivity() {
             } else {
                 binding.validatingOverlay.visibility = View.GONE
                 button.isEnabled = true
+                button.requestFocus() // 失败时保持焦点在当前按钮
                 Toast.makeText(this@SetupActivity, R.string.setup_invalid, Toast.LENGTH_LONG).show()
                 binding.txtScanStatus.setText(R.string.setup_scan_idle)
-                // 失败后焦点移到连接按钮，避免误删
-                binding.btnConnect.requestFocus()
             }
         }
     }
@@ -257,5 +260,19 @@ class SetupActivity : AppCompatActivity() {
             view.getDrawingRect(rect)
             view.requestRectangleOnScreen(rect, true)
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // 验证蒙版显示时，按返回键取消连接请求，页面保持不变
+        if (keyCode == KeyEvent.KEYCODE_BACK &&
+            binding.validatingOverlay.visibility == View.VISIBLE) {
+            validationJob?.cancel()
+            binding.validatingOverlay.visibility = View.GONE
+            binding.txtValidatingHost.text = null
+            currentValidationButton?.isEnabled = true
+            currentValidationButton?.requestFocus()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
     }
 }

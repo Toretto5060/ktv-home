@@ -33,6 +33,15 @@ class LanScanner {
         .retryOnConnectionFailure(false)
         .build()
 
+    private var currentCall: okhttp3.Call? = null
+    private var currentJob: kotlinx.coroutines.Job? = null
+
+    /** 取消当前正在进行的验证请求 */
+    fun cancelValidation() {
+        currentCall?.cancel()
+        currentJob?.cancel()
+    }
+
     /** 扫描本机所在 /24 网段的所有候选端口，并逐台报告命中。 */
     suspend fun scanAll(
         onProgress: ((scanned: Int, total: Int) -> Unit)? = null,
@@ -103,7 +112,7 @@ class LanScanner {
     }
 
     companion object {
-        private const val PROBE_TIMEOUT_MS = 1500L
+        private const val PROBE_TIMEOUT_MS = 5000L
         private const val MAX_CONCURRENT_PROBES = 64
         internal val CANDIDATE_PORTS = listOf(8080, 80, 8000, 8081, 8090, 8888, 9000, 9090)
     }
