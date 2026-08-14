@@ -42,18 +42,23 @@ ENV KTV_RELEASE_VERSION=${KTV_RELEASE_VERSION} \
     KTV_RELEASE_ARMEABI_V7A_APK=classpath:/static/tv-apk/home-ktv-tv-${KTV_RELEASE_VERSION}-armeabi-v7a.apk \
     KTV_RELEASE_ARM64_V8A_APK=classpath:/static/tv-apk/home-ktv-tv-${KTV_RELEASE_VERSION}-arm64-v8a.apk
 
-# 打包 FFmpeg（含 ffprobe），供曲库扫描解析媒体。
-# Intel VAAPI requires the userspace iHD driver in addition to FFmpeg's VAAPI encoders.
-# intel-media-driver is x86_64-only, so keep the multi-architecture ARM64 image unchanged.
+# 打包 FFmpeg（含 ffprobe），供曲库扫描解析媒体和硬件转码。
+# Alpine v3.22 community 仓库的 ffmpeg 6.x 默认已启用 --enable-vaapi，因此 h264_vaapi/hevc_vaapi
+# 编码器开箱即有；不再引入 edge 仓库（含未对齐的 libplacebo/libglslang 子包）。
+# Intel iHD 驱动 + libva-utils / mesa-va-gallium 是检测/运行时必需的；它们只在 x86_64 安装。
 RUN sed -i 's#https://dl-cdn.alpinelinux.org#https://mirrors.aliyun.com#g' /etc/apk/repositories \
     && for attempt in 1 2 3; do \
-      apk add --no-cache ffmpeg && break; \
-      if [ "$attempt" -eq 3 ]; then exit 1; fi; \
-      sleep 5; \
-    done \
+         apk add --no-cache ffmpeg libva-utils && break; \
+         if [ "$attempt" -eq 3 ]; then exit 1; fi; \
+         sleep 5; \
+       done \
     && if [ "$(apk --print-arch)" = "x86_64" ]; then \
-      apk add --no-cache intel-media-driver libva-utils; \
-    fi
+         apk add --no-cache intel-media-driver mesa-va-gallium; \
+       elif [ "$(apk --print-arch)" = "aarch64" ]; then \
+         apk add --no-cache rockchip-mpp-dev 2>/dev/null || true; \
+       fi \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -E "h264_vaapi|hevc_vaapi" \
+       || (echo "FATAL: installed ffmpeg does not expose h264_vaapi/hevc_vaapi encoders" && exit 1)
 
 COPY --from=build /build/target/home-ktv-server.jar app.jar
 

@@ -41,6 +41,13 @@ services:
       # Intel GPU passthrough for VAAPI hardware acceleration.
       # Intel 核显透传，用于 VAAPI 硬件加速。
       - /dev/dri:/dev/dri
+    # Make sure the root JVM can drmOpenByType() the render node — on DSM
+    # the render node is owned by the dynamic `render` group (GID 937),
+    # not `video`. See docker-compose.hardware.yml for details.
+    group_add:
+      - "937"
+      - "44"
+      - "109"
     environment:
       SERVER_PORT: 8080
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/ktv

@@ -27,6 +27,13 @@ services:
     container_name: ktv-app
     devices:
       - /dev/dri:/dev/dri
+    # Allow the JVM process to access /dev/dri/renderD* via the render group
+    # (GID 937 on Synology DSM). The backend also tries to auto-recover at
+    # startup if the kernel still rejects root access.
+    group_add:
+      - "937"
+      - "44"
+      - "109"
     environment:
       SERVER_PORT: 8083
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5433/ktv-db

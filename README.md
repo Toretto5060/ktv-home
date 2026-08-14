@@ -28,9 +28,9 @@ docker buildx inspect --bootstrap
 docker buildx build \
   --progress=plain \
   --platform linux/amd64,linux/arm64 \
-  --build-arg KTV_RELEASE_VERSION=0.1.2 \
-  --build-arg KTV_RELEASE_VERSION_CODE=3 \
-  -t toretto5060/ktv-home:0.1.2 \
+  --build-arg KTV_RELEASE_VERSION=0.1.4 \
+  --build-arg KTV_RELEASE_VERSION_CODE=5 \
+  -t toretto5060/ktv-home:0.1.4 \
   -t toretto5060/ktv-home:latest \
   --push \
   -f backend/Dockerfile \

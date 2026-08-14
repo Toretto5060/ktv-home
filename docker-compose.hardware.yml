@@ -2,5 +2,17 @@ services:
   ktv:
     # Optional Intel/AMD GPU device passthrough for hardware video acceleration.
     # 可选的 Intel/AMD GPU 设备透传，用于硬件视频加速。
+    #
+    # `group_add` is critical on hosts where /dev/dri/renderD* is group-owned
+    # by the dynamic `render` group (GID 937 on Synology DSM) instead of `video`.
+    # Without it, even `root` inside the container receives EACCES on
+    # libva's drmOpenByType() and VAAPI probing returns `Invalid argument`.
+    # 在 DSM / 部分 NAS 系统里，/dev/dri/renderD* 由动态 render 组（GID 937）
+    # 而不是 video 组持有，必须在容器里把这个 GID 加进 root 的补充组，否则
+    # libva 在 drmOpenByType() 步骤会拿到 EACCES → "Invalid argument"。
+    group_add:
+      - "937"   # Synology DSM dynamic render group on DS920/DS923/etc.
+      - "44"    # video group on standard Linux distros (Debian/Ubuntu/Fedora)
+      - "109"   # render group on some distros (Arch / openSUSE)
     devices:
       - /dev/dri:/dev/dri
