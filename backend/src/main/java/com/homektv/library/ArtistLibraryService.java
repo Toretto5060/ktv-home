@@ -1,176 +1,198 @@
 package com.homektv.library;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.homektv.ai.AiConfigService;
-import com.homektv.ai.OpenAiCompatibleClient;
+import com.homektv.domain.ArtistMetadata;
 import com.homektv.domain.Song;
+import com.homektv.repo.ArtistMetadataRepository;
 import com.homektv.repo.SongRepository;
 import com.homektv.web.ApiException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 /**
- * 歌手库服务：按歌手名称聚合歌曲，提供性别 AI 建议和人工复核应用。
- * 同名歌手不会自动合并，复核时展示代表歌曲帮助管理员判断。
+ * 歌手库服务（v2）：从 songs 表聚合歌手，合并 artist_metadata 中的头像与性别。
  */
 @Service
 public class ArtistLibraryService {
     private static final Set<String> GENDERS = Set.of("男歌手", "女歌手", "组合", "未知");
 
-    private final SongRepository songs;
-    private final AiConfigService aiConfig;
-    private final OpenAiCompatibleClient aiClient;
-    private final ObjectMapper mapper;
+    private final ArtistMetadataRepository metaRepo;
+    private final SongRepository songRepo;
+    private final ArtistScraperService scraper;
 
-    public ArtistLibraryService(SongRepository songs, AiConfigService aiConfig,
-                                OpenAiCompatibleClient aiClient, ObjectMapper mapper) {
-        this.songs = songs;
-        this.aiConfig = aiConfig;
-        this.aiClient = aiClient;
-        this.mapper = mapper;
+    public ArtistLibraryService(ArtistMetadataRepository metaRepo, SongRepository songRepo,
+                                ArtistScraperService scraper) {
+        this.metaRepo = metaRepo;
+        this.songRepo = songRepo;
+        this.scraper = scraper;
     }
 
-    public List<Map<String, Object>> list(String keyword, String gender, Boolean reviewed, int limit) {
-        String query = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
-        Map<String, List<Song>> grouped = validSongs().stream()
-                .collect(Collectors.groupingBy(song -> song.getArtist() == null ? "未知歌手" : song.getArtist().trim(),
-                        LinkedHashMap::new, Collectors.toList()));
-        return grouped.entrySet().stream()
-                .filter(entry -> query.isBlank() || entry.getKey().toLowerCase(Locale.ROOT).contains(query))
-                .map(entry -> artistValue(entry.getKey(), entry.getValue()))
-                .filter(value -> gender == null || gender.isBlank() || gender.equals(value.get("gender")))
-                .filter(value -> reviewed == null || reviewed == ((Boolean) value.get("reviewed")))
-                .sorted(Comparator.comparingInt((Map<String, Object> value) -> (Integer) value.get("songCount"))
-                        .reversed().thenComparing(value -> (String) value.get("name")))
-                .limit(Math.max(1, Math.min(limit, 5000)))
-                .toList();
-    }
+    /**
+     * 分页列表：从 songs 表聚合所有歌手，合并 artist_metadata 中的头像和性别。
+     * @param page 页码（从 0 开始）
+     * @param size 每页条数
+     */
+    public Map<String, Object> list(String keyword, String gender, Boolean reviewed, Boolean avatar,
+                                    int page, int size) {
+        Map<String, ArtistMetadata> metaMap = new HashMap<>();
+        metaRepo.findAll().forEach(m -> metaMap.put(m.getArtistName(), m));
 
-    /** 对一个歌手的代表歌曲进行 AI 分析；没有 AI 时返回可人工填写的未知建议。 */
-    public Map<String, Object> analyze(String artist) {
-        List<Song> matches = songsFor(artist);
-        if (matches.isEmpty()) throw new ApiException("ARTIST_NOT_FOUND", "歌手不存在");
-        return analyze(artist, matches);
-    }
+        String q = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
 
-    private Map<String, Object> analyze(String artist, List<Song> matches) {
-        List<Song> samples = representativeSongs(matches);
-        if (!aiConfig.isConfigured()) return suggestion("未知", 0, "LOCAL", "未配置 AI，无法可靠推断歌手类型，请人工复核", samples);
-        try {
-            String sampleJson = mapper.writeValueAsString(samples.stream().map(song -> Map.of(
-                    "title", song.getTitle(), "artist", song.getArtist(), "language", song.getLanguage(),
-                    "vocalForm", song.getVocalForm(), "tags", song.getTags() == null ? List.of() : Arrays.asList(song.getTags()))).toList());
-            JsonNode result = aiClient.completeJsonPromptOnly("BULK",
-                    "你是 KTV 歌手资料审核助手。根据同名歌手的代表歌曲判断歌手类型。只返回 JSON：gender（男歌手、女歌手、组合、未知之一）、confidence（0到1）、reason。证据不足必须返回未知，不要猜测。",
-                    "歌手名称：" + artist + "\n代表歌曲：" + sampleJson, 700);
-            String value = result.path("gender").asText(result.path("artistGender").asText("未知"));
-            if (!GENDERS.contains(value)) value = "未知";
-            double confidence = Math.max(0, Math.min(1, result.path("confidence").asDouble(0)));
-            return suggestion(value, confidence, "AI", result.path("reason").asText("请人工确认"), samples);
-        } catch (RuntimeException | java.io.IOException failure) {
-            return suggestion("未知", 0, "LOCAL", "AI 调用失败，请人工复核：" + safeMessage(failure), samples);
-        }
-    }
-
-    /** 批量分析歌手，只返回建议，不自动写回歌曲。 */
-    public List<Map<String, Object>> analyzeBatch(Collection<String> artists) {
-        if (artists == null) return List.of();
-        List<String> names = artists.stream()
+        List<Map<String, Object>> all = validSongs().stream()
+                .collect(Collectors.groupingBy(Song::getArtist))
+                .entrySet().stream()
+                .filter(e -> q.isBlank() || e.getKey().toLowerCase(Locale.ROOT).contains(q))
+                .map(e -> {
+                    String name = e.getKey();
+                    List<Song> songs = e.getValue();
+                    ArtistMetadata meta = metaMap.get(name);
+                    String g = meta != null ? meta.getGender() : dominantGender(songs);
+                    if (gender != null && !gender.isBlank() && !gender.equals(g)) return null;
+                    boolean hasAvatar = meta != null && meta.getAvatarUrl() != null && !meta.getAvatarUrl().isBlank();
+                    if (avatar != null && !avatar && hasAvatar) return null;
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("name", name);
+                    map.put("gender", g);
+                    map.put("songCount", songs.size());
+                    map.put("avatarUrl", hasAvatar ? "/api/artist-avatar/" + urlEncode(name) : "");
+                    map.put("hasAvatar", hasAvatar);
+                    map.put("songs", representativeSongs(songs));
+                    return map;
+                })
                 .filter(Objects::nonNull)
-                .map(String::trim)
-                .filter(value -> !value.isBlank())
-                .distinct()
-                .limit(500)
+                .sorted(Comparator.comparingInt((Map<String, Object> m) -> (Integer) m.get("songCount")).reversed()
+                        .thenComparing(m -> (String) m.get("name")))
                 .toList();
-        if (names.isEmpty()) return List.of();
-        Map<String, List<Song>> grouped = validSongs().stream().collect(Collectors.groupingBy(
-                song -> normalizeArtist(song.getArtist()), LinkedHashMap::new, Collectors.toList()));
-        AiConfigService.ResolvedConfig config = aiConfig.resolve();
-        int configuredConcurrency = config == null ? 1 : config.bulkConcurrency();
-        int concurrency = Math.max(1, Math.min(configuredConcurrency, names.size()));
-        try (var executor = Executors.newFixedThreadPool(concurrency)) {
-            List<CompletableFuture<Map<String, Object>>> futures = names.stream()
-                    .map(artist -> CompletableFuture.supplyAsync(
-                            () -> analyzeBatchItem(artist, grouped.get(normalizeArtist(artist))), executor))
-                    .toList();
-            return futures.stream().map(CompletableFuture::join).toList();
-        }
+
+        int total = all.size();
+        int safePage = Math.max(0, page);
+        int safeSize = Math.max(1, Math.min(size, 200));
+        int from = Math.min(safePage * safeSize, total);
+        int to = Math.min(from + safeSize, total);
+        List<Map<String, Object>> content = from < total ? all.subList(from, to) : List.of();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", content);
+        result.put("total", total);
+        result.put("page", safePage);
+        result.put("size", safeSize);
+        result.put("totalPages", (total + safeSize - 1) / safeSize);
+        return result;
     }
 
-    private Map<String, Object> analyzeBatchItem(String artist, List<Song> matches) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("artist", artist);
-        try {
-            if (matches == null || matches.isEmpty()) throw new ApiException("ARTIST_NOT_FOUND", "歌手不存在");
-            result.putAll(analyze(artist, matches));
-        } catch (RuntimeException failure) {
-            result.putAll(suggestion("未知", 0, "LOCAL", "分析失败，请人工复核：" + safeMessage(failure), List.of()));
-        }
-        return result;
+    public Map<String, Object> get(String artist) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> content = (List<Map<String, Object>>) list(null, null, null, null, 0, Integer.MAX_VALUE).get("content");
+        return content.stream()
+                .filter(m -> artist.equals(m.get("name")))
+                .findFirst()
+                .orElseThrow(() -> new ApiException("ARTIST_NOT_FOUND", "歌手不存在"));
     }
 
     @Transactional
     public Map<String, Object> apply(String artist, String gender) {
         if (!GENDERS.contains(gender)) throw new ApiException("INVALID_ARTIST_GENDER", "歌手类型无效");
-        List<Song> matches = songsFor(artist);
-        if (matches.isEmpty()) throw new ApiException("ARTIST_NOT_FOUND", "歌手不存在");
-        matches.forEach(song -> {
-            song.setArtistGender(gender);
-            song.lockMetadata("artistGender");
-        });
-        songs.saveAll(matches);
-        return Map.of("artist", artist, "gender", gender, "updated", matches.size());
+        return update(artist, gender, null);
     }
 
-    private List<Song> validSongs() { return songs.findAll().stream().filter(song -> "ok".equals(song.getStatus())).toList(); }
-
-    private List<Song> songsFor(String artist) {
-        if (artist == null || artist.isBlank()) return List.of();
-        String normalized = normalizeArtist(artist);
-        return validSongs().stream().filter(song -> normalized.equals(normalizeArtist(song.getArtist()))).toList();
+    @Transactional
+    public Map<String, Object> update(String artistName, String gender, String avatarUrl) {
+        ArtistMetadata meta = metaRepo.findById(artistName)
+                .orElseGet(() -> { ArtistMetadata m = new ArtistMetadata(); m.setArtistName(artistName); return m; });
+        if (gender != null && !gender.isBlank()) meta.setGender(gender);
+        if (avatarUrl != null) meta.setAvatarUrl(avatarUrl.isBlank() ? null : avatarUrl);
+        metaRepo.save(meta);
+        return toMap(artistName, meta);
     }
 
-    private static String normalizeArtist(String artist) {
-        return artist == null ? "" : artist.trim().toLowerCase(Locale.ROOT);
+    /** 手动刮削单个歌手头像。 */
+    @Transactional
+    public Map<String, Object> scrape(String artist) {
+        return scrapeBatch(List.of(artist)).stream().findFirst().orElse(Map.of());
     }
 
-    private Map<String, Object> artistValue(String name, List<Song> values) {
-        String gender = dominantGender(values);
-        boolean reviewed = !"未知".equals(gender) && values.stream()
-                .allMatch(song -> gender.equals(song.getArtistGender()) && song.isMetadataLocked("artistGender"));
-        return Map.of("name", name, "gender", gender, "reviewed", reviewed,
-                "songCount", values.size(), "songs", representativeSongs(values).stream().map(this::songValue).toList());
+    /** 批量刮削歌手头像。 */
+    public List<Map<String, Object>> scrapeBatch(Collection<String> artistNames) {
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (String name : artistNames) {
+            try {
+                ArtistMetadata meta = metaRepo.findById(name).orElseGet(() -> {
+                    ArtistMetadata m = new ArtistMetadata(); m.setArtistName(name); m.setGender("未知"); return m;
+                });
+                String remoteUrl = scraper.findAvatarUrl(name);
+                String relPath = null;
+                if (remoteUrl != null && !remoteUrl.isBlank()) {
+                    relPath = scraper.downloadAndSave(name, remoteUrl);
+                }
+                meta.setAvatarUrl(relPath);
+                if (relPath != null) meta.setSource("SCRAPED");
+                metaRepo.save(meta);
+                results.add(toMap(name, meta));
+            } catch (Exception e) {
+                Map<String, Object> fail = new LinkedHashMap<>();
+                fail.put("name", name); fail.put("avatarUrl", ""); fail.put("gender", "未知");
+                fail.put("songs", List.of()); fail.put("songCount", 0);
+                results.add(fail);
+            }
+        }
+        return results;
     }
 
-    private String dominantGender(List<Song> values) {
-        return values.stream().map(Song::getArtistGender).filter(GENDERS::contains).filter(value -> !"未知".equals(value))
-                .collect(Collectors.groupingBy(value -> value, Collectors.counting())).entrySet().stream()
+    /** 同步：删除不在 songs 表中的歌手元数据。 */
+    @Transactional
+    public int syncWithSongs() {
+        Set<String> allArtists = validSongs().stream().map(Song::getArtist)
+                .filter(a -> a != null && !a.isBlank()).collect(Collectors.toSet());
+        List<ArtistMetadata> stale = metaRepo.findAll().stream()
+                .filter(a -> !allArtists.contains(a.getArtistName())).toList();
+        metaRepo.deleteAll(stale);
+        return stale.size();
+    }
+
+    // ---- 辅助 ----
+
+    private List<Song> validSongs() {
+        return songRepo.findAll().stream().filter(s -> "ok".equals(s.getStatus())).toList();
+    }
+
+    private String dominantGender(List<Song> songs) {
+        return songs.stream().map(Song::getArtistGender)
+                .filter(g -> g != null && !g.isBlank() && !"未知".equals(g))
+                .collect(Collectors.groupingBy(g -> g, Collectors.counting())).entrySet().stream()
                 .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse("未知");
     }
 
-    private List<Song> representativeSongs(List<Song> values) {
-        return values.stream().sorted(Comparator.comparingInt(Song::getPlayCount).reversed().thenComparing(Song::getTitle, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER))).limit(5).toList();
+    private List<Map<String, Object>> representativeSongs(List<Song> songs) {
+        return songs.stream()
+                .sorted(Comparator.comparingInt(Song::getPlayCount).reversed().thenComparing(Song::getTitle, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)))
+                .limit(3)
+                .map(s -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id", s.getId());
+                    m.put("title", s.getTitle());
+                    m.put("coverUrl", s.getCoverPath() == null ? "" : "/api/cover/" + s.getId());
+                    return m;
+                })
+                .toList();
     }
 
-    private Map<String, Object> songValue(Song song) {
-        return Map.of("id", song.getId(), "title", song.getTitle(), "artist", song.getArtist(),
-                "language", song.getLanguage(), "mediaType", song.getMediaType(), "coverUrl",
-                song.getCoverPath() == null ? "" : "/api/cover/" + song.getId());
+    private Map<String, Object> toMap(String name, ArtistMetadata meta) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("name", name);
+        map.put("gender", meta.getGender());
+        map.put("avatarUrl", (meta.getAvatarUrl() != null && !meta.getAvatarUrl().isBlank())
+                ? "/api/artist-avatar/" + urlEncode(name) : "");
+        map.put("songs", representativeSongs(validSongs().stream().filter(s -> name.equals(s.getArtist())).toList()));
+        map.put("songCount", validSongs().stream().filter(s -> name.equals(s.getArtist())).count());
+        return map;
     }
 
-    private Map<String, Object> suggestion(String gender, double confidence, String source, String reason, List<Song> samples) {
-        return Map.of("gender", gender, "confidence", confidence, "source", source, "reason", reason,
-                "songs", samples.stream().map(this::songValue).toList());
-    }
-
-    private String safeMessage(Throwable failure) {
-        String message = failure.getMessage();
-        return message == null || message.isBlank() ? failure.getClass().getSimpleName() : message.substring(0, Math.min(300, message.length()));
+    private static String urlEncode(String s) {
+        try { return URLEncoder.encode(s, StandardCharsets.UTF_8); } catch (Exception e) { return s; }
     }
 }

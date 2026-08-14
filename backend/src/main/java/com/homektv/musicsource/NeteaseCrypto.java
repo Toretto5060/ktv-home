@@ -11,7 +11,7 @@ import java.security.SecureRandom;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 
-final class NeteaseCrypto {
+public final class NeteaseCrypto {
     private static final byte[] EAPI_KEY = "e82ckenh8dichen8".getBytes(StandardCharsets.UTF_8);
     private static final byte[] PRESET_KEY = "0CoJUm6Qyw8W8jud".getBytes(StandardCharsets.UTF_8);
     private static final byte[] IV = "0102030405060708".getBytes(StandardCharsets.UTF_8);
@@ -20,7 +20,7 @@ final class NeteaseCrypto {
 
     private NeteaseCrypto() {}
 
-    static String eapi(String path, String json) {
+    public static String eapi(String path, String json) {
         try {
             String digest = hex(MessageDigest.getInstance("MD5").digest(("nobody" + path + "use" + json + "md5forencrypt").getBytes(StandardCharsets.UTF_8)), false);
             String data = path + "-36cd479b6b5-" + json + "-36cd479b6b5-" + digest;
@@ -32,9 +32,9 @@ final class NeteaseCrypto {
         }
     }
 
-    static WeapiPayload weapi(String json) { return weapi(json, randomSecret()); }
+    public static WeapiPayload weapi(String json) { return weapi(json, randomSecret()); }
 
-    static WeapiPayload weapi(String json, String secret) {
+    public static WeapiPayload weapi(String json, String secret) {
         try {
             String once = aesCbc(json, PRESET_KEY);
             String params = aesCbc(once, secret.getBytes(StandardCharsets.UTF_8));
@@ -69,5 +69,5 @@ final class NeteaseCrypto {
         return out.toString();
     }
 
-    record WeapiPayload(String params, String encSecKey) {}
+    public record WeapiPayload(String params, String encSecKey) {}
 }

@@ -52,6 +52,14 @@ public class AssetWriter {
         return rel;
     }
 
+    /** 写歌手头像，返回相对路径 artists/{name}.jpg */
+    public String writeArtistAvatar(String artistName, byte[] image) {
+        String safe = artistName.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fff_-]", "_");
+        String rel = "artists/" + safe + ".jpg";
+        write(rel, image);
+        return rel;
+    }
+
     private void write(String relPath, byte[] data) {
         try {
             Path target = dataRoot.resolve(relPath);

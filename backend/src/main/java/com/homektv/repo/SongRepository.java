@@ -62,7 +62,7 @@ public interface SongRepository extends JpaRepository<Song, Long> {
                 OR (:scraped = 'false' AND NOT EXISTS (
                     SELECT 1 FROM music_metadata_scrape_items i
                     WHERE i.song_id = song.id AND i.status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW'))))
-            ORDER BY song.created_at DESC
+            ORDER BY song.id DESC
             """, countQuery = """
             SELECT COUNT(*) FROM songs song
             WHERE song.id IN (

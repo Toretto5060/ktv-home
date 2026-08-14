@@ -29,6 +29,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 管理后台服务（P2.1-P2.5，详设§8）。
@@ -91,7 +92,7 @@ public class AdminService {
     public Page<AdminSongDto> listAdminSongs(String keyword, String type, String source, String scraped, int page, int size) {
         int safeSize = Math.max(1, Math.min(size, 200));
         int safePage = Math.max(0, page);
-        Pageable pageable = PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "createdAt"));
+        Pageable pageable = PageRequest.of(safePage, safeSize);
         Page<Song> songs = songRepo.searchAdminSongs(normalizeFilter(keyword), normalizeFilter(type),
                 normalizeFilter(source), normalizeFilter(scraped), pageable);
         List<Long> songIds = songs.getContent().stream().map(Song::getId).toList();
@@ -107,9 +108,14 @@ public class AdminService {
 
     private List<Long> batchScrapedSongIds(List<Long> songIds) {
         if (songIds.isEmpty()) return List.of();
-        String placeholders = String.join(",", java.util.Collections.nCopies(songIds.size(), "?"));
-        String sql = "SELECT DISTINCT song_id FROM music_metadata_scrape_items WHERE song_id IN (%s) AND status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW')".formatted(placeholders);
-        return jdbc.query(sql, (rs, index) -> rs.getLong(1), songIds.toArray());
+        try {
+            String placeholders = String.join(",", java.util.Collections.nCopies(songIds.size(), "?"));
+            String sql = "SELECT DISTINCT song_id FROM music_metadata_scrape_items WHERE song_id IN (%s) AND song_id IS NOT NULL AND status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW')".formatted(placeholders);
+            return jdbc.query(sql, (rs, index) -> rs.getLong(1), songIds.toArray());
+        } catch (Exception e) {
+            // music_metadata_scrape_items table may not exist yet (before first scrape)
+            return List.of();
+        }
     }
 
     @Transactional(readOnly = true)
@@ -199,6 +205,9 @@ public class AdminService {
     public void deleteSong(Long id) {
         Song song = songRepo.findById(id)
                 .orElseThrow(() -> new ApiException("SONG_NOT_FOUND", "歌曲不存在"));
+        // 清理关联的元数据刮削记录
+        String sql = "DELETE FROM music_metadata_scrape_items WHERE song_id = ?";
+        jdbc.update(sql, id);
         deleteLibraryFiles(id);
         var queueItems = queueRepo.findBySongId(id);
         var player = playerRepo.getSingleton();

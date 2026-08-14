@@ -1,10 +1,13 @@
 package com.homektv.library;
 
 import com.homektv.domain.Song;
+import com.homektv.repo.ArtistMetadataRepository;
 import com.homektv.repo.SongRepository;
 import com.homektv.web.dto.SongDto;
 import org.springframework.stereotype.Service;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -12,22 +15,39 @@ import java.util.stream.Collectors;
 @Service
 public class CategoryBrowseService {
     private final SongRepository songRepository;
+    private final ArtistMetadataRepository artistMetaRepo;
 
-    public CategoryBrowseService(SongRepository songRepository) {
+    public CategoryBrowseService(SongRepository songRepository, ArtistMetadataRepository artistMetaRepo) {
         this.songRepository = songRepository;
+        this.artistMetaRepo = artistMetaRepo;
     }
 
     public List<Map<String, Object>> artists() {
+        // 预加载歌手头像映射
+        Map<String, String> avatarMap = new HashMap<>();
+        artistMetaRepo.findAll().forEach(a -> {
+            if (a.getAvatarUrl() != null && !a.getAvatarUrl().isBlank()) {
+                try {
+                    avatarMap.put(a.getArtistName(),
+                            "/api/artist-avatar/" + URLEncoder.encode(a.getArtistName(), StandardCharsets.UTF_8));
+                } catch (Exception ignored) { }
+            }
+        });
         return validSongs().stream()
                 .collect(Collectors.groupingBy(Song::getArtist))
                 .entrySet().stream()
                 .sorted(Comparator.<Map.Entry<String, List<Song>>>comparingInt(entry -> entry.getValue().size()).reversed()
                         .thenComparing(Map.Entry::getKey))
-                .map(entry -> Map.<String, Object>of(
-                        "name", entry.getKey(),
-                        "initial", artistInitial(entry.getValue().get(0)),
-                        "gender", dominantArtistGender(entry.getValue()),
-                        "songCount", entry.getValue().size()))
+                .map(entry -> {
+                    String name = entry.getKey();
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("name", name);
+                    m.put("avatarUrl", avatarMap.getOrDefault(name, ""));
+                    m.put("initial", artistInitial(entry.getValue().get(0)));
+                    m.put("gender", dominantArtistGender(entry.getValue()));
+                    m.put("songCount", entry.getValue().size());
+                    return m;
+                })
                 .toList();
     }
 
