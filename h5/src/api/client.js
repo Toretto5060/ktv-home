@@ -163,6 +163,7 @@ export const api = {
   adminAiConfig: () => request('/admin/ai/config'),
   adminAiPutConfig: (body) => request('/admin/ai/config', { method: 'PUT', body: JSON.stringify(body) }),
   adminAiModels: () => request('/admin/ai/config/models'),
+  adminArtistStats: () => request('/admin/artists/stats'),
   adminArtists: (params = {}) => request('/admin/artists?' + new URLSearchParams(Object.entries(params).filter(([, value]) => value !== '' && value != null)).toString()),
   adminScrapeArtist: (artist) => request('/admin/artists/scrape', { method: 'POST', body: JSON.stringify({ artist }) }),
   adminScrapeArtists: (artists) => request('/admin/artists/scrape-batch', { method: 'POST', body: JSON.stringify({ artists }) }),

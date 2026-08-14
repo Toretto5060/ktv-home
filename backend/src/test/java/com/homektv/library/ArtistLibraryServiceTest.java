@@ -111,6 +111,20 @@ class ArtistLibraryServiceTest {
         verify(metaRepo).deleteAll(List.of(stale));
     }
 
+    @Test
+    void statsReturnsCorrectCounts() {
+        Song male = song(1L, "歌手甲", "歌曲一", "男歌手", 1);
+        Song female = song(2L, "歌手乙", "歌曲二", "女歌手", 2);
+        when(songRepo.findAll()).thenReturn(List.of(male, female));
+        when(metaRepo.findAll()).thenReturn(List.of());
+
+        Map<String, Object> result = service.stats();
+
+        assertThat(result).containsEntry("total", 2L);
+        assertThat(result).containsEntry("hasAvatar", 0L);
+        assertThat(result).containsEntry("noAvatar", 2L);
+    }
+
     private Song song(Long id, String artist, String title, String gender, int playCount) {
         Song song = new Song();
         song.setId(id);

@@ -164,6 +164,7 @@ import AdminLayout from './AdminLayout.vue'
 import { alertDialog } from '../../composables/useDialog'
 
 const artists = ref([]), loading = ref(false), total = ref(0), page = ref(0), totalPages = ref(1)
+const stats = ref({ total: 0, hasAvatar: 0, noAvatar: 0 })
 const filters = reactive({ keyword: '', gender: '', avatar: '' })
 const scrapeLoading = ref({})
 const syncing = ref(false)
@@ -175,10 +176,17 @@ const batchScrapeProgress = ref(0)
 const batchArtists = ref([])
 const batchScrapeResults = ref([])
 
-const hasAvatarCount = computed(() => artists.value.filter(a => a.avatarUrl).length)
-const noAvatarCount = computed(() => artists.value.filter(a => !a.avatarUrl).length)
+const hasAvatarCount = computed(() => stats.value.hasAvatar)
+const noAvatarCount = computed(() => stats.value.noAvatar)
 
-onMounted(load)
+onMounted(() => { loadStats(); load() })
+async function loadStats() {
+  try {
+    const r = await api.adminArtistStats()
+    stats.value = r || { total: 0, hasAvatar: 0, noAvatar: 0 }
+    total.value = r.total || 0
+  } catch {}
+}
 async function load() {
   loading.value = true
   try {
@@ -188,13 +196,15 @@ async function load() {
     if (filters.avatar) params.avatar = filters.avatar
     const r = await api.adminArtists(params)
     artists.value = r.content || []
-    total.value = r.total || 0
-    totalPages.value = r.totalPages || 1
+    if (page.value === 0) {
+      total.value = r.total || 0
+      totalPages.value = r.totalPages || 1
+    }
   } catch (e) {
     await alertDialog(e.message || '歌手列表加载失败')
   } finally { loading.value = false }
 }
-function reset() { Object.assign(filters, { keyword: '', gender: '', avatar: '' }); page.value = 0; load() }
+function reset() { Object.assign(filters, { keyword: '', gender: '', avatar: '' }); page.value = 0; loadStats(); load() }
 function go(p) { if (p >= 0 && p < totalPages.value) { page.value = p; load() } }
 
 async function updateGender(name, gender) {
@@ -236,6 +246,7 @@ async function startBatchScrape() {
       batchScrapeProgress.value += chunk.length
     }
     // 更新列表
+    await loadStats()
     await load()
   } catch (e) { await alertDialog(e.message || '批量刮削失败') }
   finally { batchScrapeAnalyzing.value = false }
@@ -246,6 +257,7 @@ async function syncArtists() {
   try {
     const result = await api.adminSyncArtists()
     await alertDialog(`已清理 ${result.deleted || 0} 位不在曲库中的歌手`)
+    await loadStats()
     await load()
   } catch (e) { await alertDialog(e.message || '同步失败') }
   finally { syncing.value = false }

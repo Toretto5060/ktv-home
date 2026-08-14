@@ -3,20 +3,20 @@ package com.homektv.library;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homektv.musicsource.MusicProvider;
+import com.homektv.musicsource.MusicSourceConfig;
+import com.homektv.musicsource.MusicSourceConfigService;
 import com.homektv.musicsource.MusicSourceException;
 import com.homektv.musicsource.NeteaseCrypto;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.*;
 
@@ -26,31 +26,59 @@ import java.util.*;
 @Service
 public class ArtistScraperService {
     private static final Logger log = LoggerFactory.getLogger(ArtistScraperService.class);
-    private static final Duration SCRAPE_TIMEOUT = Duration.ofSeconds(10);
     private static final int MAX_AVATAR_BYTES = 2 * 1024 * 1024;
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final AssetWriter writer;
+    private final MusicSourceConfigService configService;
 
-    public ArtistScraperService(AssetWriter writer) {
+    public ArtistScraperService(AssetWriter writer, MusicSourceConfigService configService) {
         this.writer = writer;
+        this.configService = configService;
     }
 
-    /** 依次尝试各平台，返回第一个有效头像 URL，失败返回 null。 */
+    /**
+     * 根据系统设置配置的刮削平台依次尝试，返回第一个有效头像 URL，失败返回 null。
+     * 若开关未开启或未配置任何平台则直接返回 null，不发起任何网络请求。
+     */
     public String findAvatarUrl(String artistName) {
-        String url = tryQqMusicAvatar(artistName);
-        if (url != null) return url;
-        url = tryNeteaseAvatar(artistName);
-        if (url != null) return url;
-        return tryKugouAvatar(artistName);
+        MusicSourceConfig config = configService.getConfig();
+        if (!config.enabled() || config.providers().isEmpty()) {
+            return null;
+        }
+
+        for (MusicProvider provider : config.providers()) {
+            try {
+                String url = fetchAvatar(provider, artistName, config.requestIntervalMs());
+                if (url != null) return url;
+            } catch (Exception e) {
+                log.warn("[{}] 头像搜索失败 '{}': {}", provider, artistName, e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    private String fetchAvatar(MusicProvider provider, String artistName, int intervalMs) {
+        sleep(intervalMs);
+        return switch (provider) {
+            case QQ -> tryQqMusicAvatar(artistName);
+            case NETEASE -> tryNeteaseAvatar(artistName);
+            case KUGOU -> tryKugouAvatar(artistName);
+        };
+    }
+
+    private static void sleep(int ms) {
+        if (ms <= 0) return;
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
     }
 
     /** 从远程 URL 下载头像图片并写入 data/artists/ 目录，返回相对路径，失败返回 null。 */
     public String downloadAndSave(String artistName, String remoteUrl) {
         try {
+            int timeout = Math.max(5, configService.getConfig().timeoutSeconds());
             HttpClient client = HttpClient.newHttpClient();
             HttpRequest req = HttpRequest.newBuilder(URI.create(remoteUrl))
-                    .timeout(Duration.ofSeconds(15))
+                    .timeout(Duration.ofSeconds(timeout))
                     .header("User-Agent", "HomeKTV/0.1 avatar")
                     .header("Accept", "image/*")
                     .GET().build();
@@ -121,33 +149,31 @@ public class ArtistScraperService {
             var http = new SimpleHttp(MusicProvider.NETEASE);
             Map<String, Object> searchData = new LinkedHashMap<>();
             searchData.put("s", artistName); searchData.put("type", 100); searchData.put("limit", 1); searchData.put("offset", 0);
-            Map<String, String> form = Map.of(
-                    "params", NeteaseCrypto.eapi("/api/search/get", toJson(searchData)),
-                    "encSecKey", NeteaseCrypto.weapi("").encSecKey());
-            JsonNode root = http.form("https://music.163.com/eapi/search/get", form,
+            NeteaseCrypto.WeapiPayload payload = NeteaseCrypto.weapi(toJson(searchData));
+            Map<String, String> form = Map.of("params", payload.params(), "encSecKey", payload.encSecKey());
+            JsonNode root = http.form("https://music.163.com/weapi/search/get", form,
                     Map.of("Referer", "https://music.163.com/"));
             JsonNode artists = root.path("result").path("artists");
             if (!artists.isArray() || artists.isEmpty()) {
                 log.debug("[网易云] 未找到歌手 '{}'，响应: {}", artistName, root.toString());
                 return null;
             }
-            long artistId = artists.get(0).path("id").asLong(0);
+            JsonNode artist = artists.get(0);
+            long artistId = artist.path("id").asLong(0);
             if (artistId == 0) {
                 log.debug("[网易云] 歌手 '{}' 无有效ID，响应: {}", artistName, root.toString());
                 return null;
             }
-            Map<String, Object> detailData = Map.of("id", artistId);
-            Map<String, String> detailForm = Map.of(
-                    "params", NeteaseCrypto.eapi("/api/artist/avatar", toJson(detailData)),
-                    "encSecKey", NeteaseCrypto.weapi("").encSecKey());
-            JsonNode detail = http.form("https://music.163.com/eapi/artist/avatar", detailForm,
-                    Map.of("Referer", "https://music.163.com/"));
-            String img = detail.path("data").path("avatar").asText(null);
-            if (img == null || img.isBlank()) {
-                log.debug("[网易云] 歌手 '{}' 无头像，响应: {}", artistName, detail.toString());
+            String picUrl = artist.path("picUrl").asText(null);
+            if (picUrl == null || picUrl.isBlank()) {
+                // fallback: use img1v1Url (lower quality but always present)
+                picUrl = artist.path("img1v1Url").asText(null);
+            }
+            if (picUrl == null || picUrl.isBlank()) {
+                log.debug("[网易云] 歌手 '{}' 无头像，响应: {}", artistName, root.toString());
                 return null;
             }
-            String url = img.replace("http://", "https://");
+            String url = picUrl.replace("http://", "https://");
             log.info("[网易云] 找到头像 '{}' -> {}", artistName, url);
             return url;
         } catch (Exception e) { log.warn("[网易云] 头像搜索失败 '{}': {}", artistName, e.getMessage()); }
@@ -155,43 +181,9 @@ public class ArtistScraperService {
     }
 
     // ---- 酷狗 ----
-
+    // 注：酷狗 /krcserver/v1/token?method=info.get_singer 端点已下线（502），
+    //     singerimg CDN 路径也已失效（404），暂无可用替代接口，故跳过。
     private String tryKugouAvatar(String artistName) {
-        try {
-            var http = new SimpleHttp(MusicProvider.KUGOU);
-            Map<String, String> sq = new LinkedHashMap<>();
-            sq.put("keyword", artistName); sq.put("page", "1"); sq.put("pagesize", "1");
-            sq.put("userid", "-1"); sq.put("clientver", ""); sq.put("platform", "WebFilter");
-            JsonNode searchRoot = http.get("https://songsearch.kugou.com/song_search_v2?" + query(sq), Map.of());
-            JsonNode lists = searchRoot.path("data").path("lists");
-            if (!lists.isArray() || lists.isEmpty()) {
-                log.debug("[酷狗] 未找到歌手 '{}'，响应: {}", artistName, searchRoot.toString());
-                return null;
-            }
-            String singerId = text(lists.get(0), "singerid", "SingerId");
-            if (singerId == null || singerId.isBlank()) {
-                log.debug("[酷狗] 歌手 '{}' 无 singerId，响应: {}", artistName, searchRoot.toString());
-                return null;
-            }
-            String now = String.valueOf(System.currentTimeMillis() / 1000);
-            Map<String, String> params = new LinkedHashMap<>();
-            params.put("method", "info.get_singer"); params.put("platform", "Android");
-            params.put("appid", "1005"); params.put("clientver", "12050");
-            params.put("clienttime", now); params.put("singerid", singerId); params.put("hash", "");
-            params.put("signature", kgSignature(params, ""));
-            String apiUrl = "https://gateway.kugou.com/krcserver/v1/token?" + query(params);
-            JsonNode detail = http.get(apiUrl, Map.of(
-                    "x-router", " singerinfo.kugou.com",
-                    "User-Agent", "Android12-ati9z-12050-46-0-DiscoveryDRADProtocol-wifi"));
-            String avatar = detail.path("data").path("imgUrl").asText(null);
-            if (avatar == null || avatar.isBlank()) {
-                log.debug("[酷狗] 歌手 '{}' 无头像，响应: {}", artistName, detail.toString());
-                return null;
-            }
-            String url = avatar.replace("\\", "").replace("\"", "");
-            log.info("[酷狗] 找到头像 '{}' -> {}", artistName, url);
-            return url;
-        } catch (Exception e) { log.warn("[酷狗] 头像搜索失败 '{}': {}", artistName, e.getMessage()); }
         return null;
     }
 
@@ -232,33 +224,21 @@ public class ArtistScraperService {
         return null;
     }
 
-    private static String kgSignature(Map<String, ?> params, String body) {
-        try {
-            String joined = params.entrySet().stream()
-                    .filter(e -> !"signature".equals(e.getKey()))
-                    .sorted(Comparator.comparing(Map.Entry::getKey))
-                    .map(e -> e.getKey() + "=" + String.valueOf(e.getValue()))
-                    .reduce("", String::concat);
-            byte[] digest = MessageDigest.getInstance("MD5").digest(
-                    ("OIlwieks28dk2k092lksi2UIkp" + joined + body + "OIlwieks28dk2k092lksi2UIkp")
-                            .getBytes(StandardCharsets.UTF_8));
-            StringBuilder out = new StringBuilder(32);
-            for (byte b : digest) out.append(String.format("%02x", b & 0xff));
-            return out.toString();
-        } catch (Exception e) { throw new RuntimeException(e); }
-    }
-
     // ---- 内联简化 HTTP 客户端 ----
 
-    private static class SimpleHttp {
+    private class SimpleHttp {
         private final HttpClient client = HttpClient.newHttpClient();
         private final MusicProvider provider;
+        private final Duration timeout;
 
-        SimpleHttp(MusicProvider provider) { this.provider = provider; }
+        SimpleHttp(MusicProvider provider) {
+            this.provider = provider;
+            this.timeout = Duration.ofSeconds(Math.max(5, configService.getConfig().timeoutSeconds()));
+        }
 
         JsonNode get(String url, Map<String, ?> headers) {
             try {
-                var builder = HttpRequest.newBuilder(URI.create(url)).timeout(SCRAPE_TIMEOUT).GET();
+                var builder = HttpRequest.newBuilder(URI.create(url)).timeout(timeout).GET();
                 headers.forEach((k, v) -> builder.header(k, String.valueOf(v)));
                 builder.header("Accept", "application/json").header("User-Agent", "HomeKTV/0.1");
                 return mapper.readTree(client.send(builder.build(),
@@ -271,14 +251,14 @@ public class ArtistScraperService {
                 String body = form.entrySet().stream()
                         .map(e -> urlEncode(e.getKey()) + "=" + urlEncode(e.getValue()))
                         .reduce("", (a, b) -> a + (a.isEmpty() ? "" : "&") + b);
-                var builder = HttpRequest.newBuilder(URI.create(url)).timeout(SCRAPE_TIMEOUT)
+                var builder = HttpRequest.newBuilder(URI.create(url)).timeout(timeout)
                         .header("Content-Type", "application/x-www-form-urlencoded");
                 headers.forEach((k, v) -> builder.header(k, String.valueOf(v)));
                 builder.header("Accept", "application/json").header("User-Agent", "HomeKTV/0.1");
                 builder.POST(HttpRequest.BodyPublishers.ofString(body));
                 return mapper.readTree(client.send(builder.build(),
                         HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).body());
-            } catch (Exception e) { throw new MusicSourceException(provider, "表单请求失败", e); }
+            } catch (Exception e) { throw new MusicSourceException(provider, "HTTP 请求失败", e); }
         }
     }
 }

@@ -13,6 +13,12 @@ public class ArtistLibraryController {
 
     public ArtistLibraryController(ArtistLibraryService service) { this.service = service; }
 
+    /** 全量统计（不分页）。 */
+    @GetMapping("/stats")
+    public Map<String, Object> stats() {
+        return service.stats();
+    }
+
     @GetMapping
     public Map<String, Object> list(@RequestParam(required = false) String keyword,
                                     @RequestParam(required = false) String gender,

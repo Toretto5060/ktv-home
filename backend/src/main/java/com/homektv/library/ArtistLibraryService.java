@@ -85,6 +85,31 @@ public class ArtistLibraryService {
         return result;
     }
 
+    /**
+     * 全量统计：有头像歌手数、无头像歌手数、歌手总数。
+     * 不分页，用于页面顶部统计栏。
+     */
+    public Map<String, Object> stats() {
+        Map<String, ArtistMetadata> metaMap = new HashMap<>();
+        metaRepo.findAll().forEach(m -> metaMap.put(m.getArtistName(), m));
+
+        long total = validSongs().stream().map(Song::getArtist).distinct().count();
+        long hasAvatar = validSongs().stream()
+                .collect(Collectors.groupingBy(Song::getArtist))
+                .entrySet().stream()
+                .filter(e -> {
+                    ArtistMetadata meta = metaMap.get(e.getKey());
+                    return meta != null && meta.getAvatarUrl() != null && !meta.getAvatarUrl().isBlank();
+                })
+                .count();
+
+        return Map.of(
+                "total", total,
+                "hasAvatar", hasAvatar,
+                "noAvatar", total - hasAvatar
+        );
+    }
+
     public Map<String, Object> get(String artist) {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> content = (List<Map<String, Object>>) list(null, null, null, null, 0, Integer.MAX_VALUE).get("content");
