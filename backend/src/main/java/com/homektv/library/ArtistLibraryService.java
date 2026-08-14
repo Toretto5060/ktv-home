@@ -1,16 +1,22 @@
 package com.homektv.library;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.homektv.domain.ArtistMetadata;
 import com.homektv.domain.Song;
+import com.homektv.musicsource.MusicSourceConfigService;
 import com.homektv.repo.ArtistMetadataRepository;
 import com.homektv.repo.SongRepository;
 import com.homektv.web.ApiException;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -23,12 +29,31 @@ public class ArtistLibraryService {
     private final ArtistMetadataRepository metaRepo;
     private final SongRepository songRepo;
     private final ArtistScraperService scraper;
+    private final MusicSourceConfigService configService;
+
+    /** 后台刮削任务状态。null = 无任务。 */
+    private final AtomicReference<ScrapeAllTask> backgroundTask = new AtomicReference<>();
 
     public ArtistLibraryService(ArtistMetadataRepository metaRepo, SongRepository songRepo,
-                                ArtistScraperService scraper) {
+                                ArtistScraperService scraper, MusicSourceConfigService configService) {
         this.metaRepo = metaRepo;
         this.songRepo = songRepo;
         this.scraper = scraper;
+        this.configService = configService;
+    }
+
+    /** 启动后台刮削：扫描所有无头像歌手，在后台异步执行。 */
+    public void startBackgroundScrape() {
+        if (!backgroundTask.compareAndSet(null, new ScrapeAllTask())) return;
+        int intervalMs = configService.getConfig().requestIntervalMs();
+        Thread.ofVirtual().start(() -> runBackgroundScrape(intervalMs));
+    }
+
+    /** 查询后台任务状态，供前端轮询。 */
+    public Map<String, Object> backgroundTaskStatus() {
+        ScrapeAllTask task = backgroundTask.get();
+        if (task == null) return Map.of("running", false);
+        return task.status();
     }
 
     /**
@@ -43,10 +68,33 @@ public class ArtistLibraryService {
 
         String q = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
 
+        // 后台任务正在跑时，排除已完成刮削的artist（即将落库，但尚未可见）
+        Set<String> skipSet = Collections.emptySet();
+        ScrapeAllTask task = backgroundTask.get();
+        if (task != null && task.isRunning()) {
+            int skipDone = task.getDone();
+            if (skipDone > 0) {
+                // 收集已完成刮削的artist名（按扫描顺序前skipDone个无头像artist）
+                Set<String> unscrapedNames = validSongs().stream()
+                        .map(Song::getArtist).filter(Objects::nonNull).filter(a -> !a.isBlank())
+                        .distinct()
+                        .filter(name -> {
+                            ArtistMetadata m = metaMap.get(name);
+                            return m == null || m.getAvatarUrl() == null || m.getAvatarUrl().isBlank();
+                        })
+                        .limit(skipDone)
+                        .collect(Collectors.toSet());
+                skipSet = unscrapedNames;
+            }
+        }
+
+        final Set<String> finalSkipSet = skipSet;
+
         List<Map<String, Object>> all = validSongs().stream()
                 .collect(Collectors.groupingBy(Song::getArtist))
                 .entrySet().stream()
                 .filter(e -> q.isBlank() || e.getKey().toLowerCase(Locale.ROOT).contains(q))
+                .filter(e -> !finalSkipSet.contains(e.getKey()))
                 .map(e -> {
                     String name = e.getKey();
                     List<Song> songs = e.getValue();
@@ -88,6 +136,7 @@ public class ArtistLibraryService {
     /**
      * 全量统计：有头像歌手数、无头像歌手数、歌手总数。
      * 不分页，用于页面顶部统计栏。
+     * 如果后台刮削任务正在运行，"无头像"数会减去已完成的artist数（他们还没落库但即将落库）。
      */
     public Map<String, Object> stats() {
         Map<String, ArtistMetadata> metaMap = new HashMap<>();
@@ -103,10 +152,18 @@ public class ArtistLibraryService {
                 })
                 .count();
 
+        long noAvatar = total - hasAvatar;
+        // 后台刮削正在运行时，已完成的不计入"待刮削"
+        ScrapeAllTask task = backgroundTask.get();
+        if (task != null) {
+            int running = task.getDone();
+            if (running > 0) noAvatar = Math.max(0, noAvatar - running);
+        }
+
         return Map.of(
                 "total", total,
                 "hasAvatar", hasAvatar,
-                "noAvatar", total - hasAvatar
+                "noAvatar", noAvatar
         );
     }
 
@@ -141,7 +198,7 @@ public class ArtistLibraryService {
         return scrapeBatch(List.of(artist)).stream().findFirst().orElse(Map.of());
     }
 
-    /** 批量刮削歌手头像。 */
+    /** 批量刮削歌手头像（前台调用）。 */
     public List<Map<String, Object>> scrapeBatch(Collection<String> artistNames) {
         List<Map<String, Object>> results = new ArrayList<>();
         for (String name : artistNames) {
@@ -149,13 +206,20 @@ public class ArtistLibraryService {
                 ArtistMetadata meta = metaRepo.findById(name).orElseGet(() -> {
                     ArtistMetadata m = new ArtistMetadata(); m.setArtistName(name); m.setGender("未知"); return m;
                 });
-                String remoteUrl = scraper.findAvatarUrl(name);
+                ArtistScraperService.ScrapeResult result = scraper.findAvatarUrl(name);
                 String relPath = null;
-                if (remoteUrl != null && !remoteUrl.isBlank()) {
-                    relPath = scraper.downloadAndSave(name, remoteUrl);
+                if (result != null && result.url() != null) {
+                    relPath = scraper.downloadAndSave(name, result.url());
+                    if (relPath != null) meta.setSource("SCRAPED");
+                    // 优先应用刮削到的性别（仅当当前为"未知"或性别确实不同）
+                    if (result.gender() != null && !result.gender().isBlank()) {
+                        String cur = meta.getGender();
+                        if (cur == null || "未知".equals(cur) || !GENDERS.contains(cur)) {
+                            meta.setGender(result.gender());
+                        }
+                    }
                 }
                 meta.setAvatarUrl(relPath);
-                if (relPath != null) meta.setSource("SCRAPED");
                 metaRepo.save(meta);
                 results.add(toMap(name, meta));
             } catch (Exception e) {
@@ -190,6 +254,86 @@ public class ArtistLibraryService {
                 .filter(g -> g != null && !g.isBlank() && !"未知".equals(g))
                 .collect(Collectors.groupingBy(g -> g, Collectors.counting())).entrySet().stream()
                 .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse("未知");
+    }
+
+    // ---- 后台刮削任务 ----
+
+    /** 后台全量刮削任务状态。 */
+    private static class ScrapeAllTask {
+        private volatile boolean running = false;
+        private volatile int total = 0;
+        private volatile int done = 0;
+        private volatile int succeeded = 0;
+        private volatile String phase = "IDLE";
+
+        synchronized void start() { this.running = true; this.phase = "SCANNING"; }
+        synchronized void setTotal(int n) { this.total = n; this.phase = "SCRAPING"; }
+        synchronized void markDone(boolean ok) { this.done++; if (ok) this.succeeded++; }
+        synchronized void finish() { this.running = false; this.phase = "DONE"; }
+        synchronized boolean isRunning() { return this.running; }
+        synchronized int getDone() { return this.done; }
+
+        synchronized Map<String, Object> status() {
+            return Map.of(
+                    "running", running,
+                    "phase", phase,
+                    "total", total,
+                    "done", done,
+                    "succeeded", succeeded
+            );
+        }
+    }
+
+    private void runBackgroundScrape(int intervalMs) {
+        ScrapeAllTask task = backgroundTask.get();
+        task.start();
+        try {
+            Set<String> unscraped = validSongs().stream()
+                    .map(Song::getArtist).filter(Objects::nonNull)
+                    .filter(a -> !a.isBlank())
+                    .collect(Collectors.toSet());
+            Map<String, ArtistMetadata> metaMap = new HashMap<>();
+            metaRepo.findAll().forEach(m -> metaMap.put(m.getArtistName(), m));
+            List<String> toScrape = unscraped.stream()
+                    .filter(name -> {
+                        ArtistMetadata m = metaMap.get(name);
+                        return m == null || m.getAvatarUrl() == null || m.getAvatarUrl().isBlank();
+                    })
+                    .toList();
+            task.setTotal(toScrape.size());
+            for (String name : toScrape) {
+                try {
+                    ArtistMetadata meta = metaRepo.findById(name).orElseGet(() -> {
+                        ArtistMetadata m = new ArtistMetadata(); m.setArtistName(name); m.setGender("未知"); return m;
+                    });
+                    ArtistScraperService.ScrapeResult result = scraper.findAvatarUrl(name);
+                    if (result != null && result.url() != null) {
+                        String relPath = scraper.downloadAndSave(name, result.url());
+                        if (relPath != null) {
+                            meta.setAvatarUrl(relPath);
+                            meta.setSource("SCRAPED");
+                            if (result.gender() != null && !result.gender().isBlank()) {
+                                String cur = meta.getGender();
+                                if (cur == null || "未知".equals(cur) || !GENDERS.contains(cur)) {
+                                    meta.setGender(result.gender());
+                                }
+                            }
+                            metaRepo.save(meta);
+                            task.markDone(true);
+                        } else {
+                            task.markDone(false);
+                        }
+                    } else {
+                        task.markDone(false);
+                    }
+                } catch (Exception e) {
+                    task.markDone(false);
+                }
+                try { Thread.sleep(intervalMs); } catch (InterruptedException ignored) {}
+            }
+        } finally {
+            task.finish();
+        }
     }
 
     private List<Map<String, Object>> representativeSongs(List<Song> songs) {

@@ -12,8 +12,8 @@
         <button class="secondary action-btn" :disabled="loading" @click="load">
           <RefreshCw :size="15" :class="{spin: loading}" />刷新
         </button>
-        <button class="secondary action-btn" :disabled="loading || !artists.length" @click="openBatchScrape">
-          <Download :size="15" />批量刮削头像
+        <button class="secondary action-btn" :disabled="loading || noAvatarCount === 0" @click="startBackgroundScrape">
+          <Download :size="15" :class="{spin: scrapeBgRunning}" />批量刮削头像
         </button>
         <button class="secondary action-btn" :disabled="loading" @click="syncArtists">
           <RefreshCw :size="15" :class="{spin: syncing}" />同步清理
@@ -24,7 +24,14 @@
     <section class="stats-row">
       <article><span>歌手总数</span><strong>{{ total }}</strong><small>数据库中</small></article>
       <article><span>有头像</span><strong>{{ hasAvatarCount }}</strong><small>已刮削</small></article>
-      <article><span>无头像</span><strong>{{ noAvatarCount }}</strong><small>待刮削</small></article>
+      <article>
+        <span>无头像</span><strong>{{ noAvatarCount }}</strong>
+        <small v-if="!scrapeBgRunning">待刮削</small>
+        <small v-else class="scrape-tip">
+          <RefreshCw :size="10" class="spin" />
+          刮削中 {{ scrapeBgProgress.done }}/{{ scrapeBgProgress.total }}
+        </small>
+      </article>
     </section>
 
     <section class="filter-panel">
@@ -117,48 +124,12 @@
       <div class="pager"><span>第 {{ page + 1 }} / {{ totalPages || 1 }} 页</span><div><button class="secondary" :disabled="page===0" @click="go(page-1)">上一页</button><button class="secondary" :disabled="page>=totalPages-1" @click="go(page+1)">下一页</button></div></div>
     </section>
 
-    <div v-if="batchScrapeOpen" class="mask" @click.self="batchScrapeOpen = false">
-      <section class="modal" role="dialog" aria-modal="true" aria-label="批量刮削歌手头像">
-        <header class="modal-head">
-          <div>
-            <div class="modal-kicker"><Download :size="14" />批量刮削</div>
-            <h2>批量刮削歌手头像</h2>
-            <p>{{ batchScrapeAnalyzing ? '正在刮削，请保持页面打开…' : '共 ' + batchArtists.length + ' 位歌手待处理' }}</p>
-          </div>
-          <button class="icon-button" @click="batchScrapeOpen = false"><X :size="17" /></button>
-        </header>
-        <div v-if="batchScrapeAnalyzing" class="batch-loading">
-          <RefreshCw :size="20" class="spin" />
-          <strong>正在从平台下载歌手头像…</strong>
-          <span>{{ batchScrapeProgress }} / {{ batchArtists.length }}</span>
-        </div>
-        <template v-else>
-          <div class="batch-summary">
-            <span>待刮削 <strong>{{ batchArtists.length }}</strong> 位</span>
-            <span>已完成 <strong>{{ batchScrapeResults.filter(r => r.avatarUrl).length }}</strong> 位</span>
-          </div>
-          <div class="batch-list">
-            <div v-for="r in batchScrapeResults" :key="r.name" class="batch-row" :class="{ ok: r.avatarUrl }">
-              <span class="avatar-mini"><img v-if="r.avatarUrl" :src="r.avatarUrl" :alt="r.name" @error="e => e.target.style.display='none'" /><span v-else>{{ r.name.slice(0,1) }}</span></span>
-              <strong>{{ r.name }}</strong>
-              <span class="badge" :class="r.avatarUrl ? 'ok' : 'fail'">{{ r.avatarUrl ? '成功' : '失败' }}</span>
-            </div>
-          </div>
-        </template>
-        <footer class="modal-actions">
-          <button class="secondary" @click="batchScrapeOpen = false">关闭</button>
-          <button v-if="!batchScrapeAnalyzing" class="primary action-btn" :disabled="batchArtists.length === 0" @click="startBatchScrape">
-            <Download :size="14" />开始刮削
-          </button>
-        </footer>
-      </section>
-    </div>
   </AdminLayout>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
-import { ChevronDown, Download, RefreshCw, UsersRound, X } from 'lucide-vue-next'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { ChevronDown, Download, RefreshCw, UsersRound } from 'lucide-vue-next'
 import api from '../../api/client'
 import AdminLayout from './AdminLayout.vue'
 import { alertDialog } from '../../composables/useDialog'
@@ -169,17 +140,27 @@ const filters = reactive({ keyword: '', gender: '', avatar: '' })
 const scrapeLoading = ref({})
 const syncing = ref(false)
 
-// 批量刮削
-const batchScrapeOpen = ref(false)
-const batchScrapeAnalyzing = ref(false)
-const batchScrapeProgress = ref(0)
-const batchArtists = ref([])
-const batchScrapeResults = ref([])
+// 后台刮削
+const scrapeBgRunning = ref(false)
+const scrapeBgProgress = ref({})
+let scrapeBgTimer = null
 
 const hasAvatarCount = computed(() => stats.value.hasAvatar)
 const noAvatarCount = computed(() => stats.value.noAvatar)
 
-onMounted(() => { loadStats(); load() })
+onMounted(async () => {
+  loadStats()
+  load()
+  // 页面刷新后，检查后端任务是否还在跑，如果是则恢复轮询
+  try {
+    const s = await api.adminScrapeAllStatus()
+    if (s.running) {
+      scrapeBgRunning.value = true
+      scrapeBgProgress.value = s
+      scrapeBgTimer = setInterval(pollScrapeStatus, 2000)
+    }
+  } catch {}
+})
 async function loadStats() {
   try {
     const r = await api.adminArtistStats()
@@ -220,37 +201,45 @@ async function scrapeArtist(name) {
   try {
     const result = await api.adminScrapeArtist(name)
     const a = artists.value.find(x => x.name === name)
-    if (a) { a.avatarUrl = result.avatarUrl }
+    if (a) { a.avatarUrl = result.avatarUrl; a.gender = result.gender }
   } catch (e) { await alertDialog(e.message || '刮削失败') }
   finally { scrapeLoading.value[name] = false }
 }
 
-function openBatchScrape() {
-  batchArtists.value = artists.value.map(a => a.name).slice(0, 500)
-  batchScrapeResults.value = []
-  batchScrapeProgress.value = 0
-  batchScrapeOpen.value = true
+async function startBackgroundScrape() {
+  if (scrapeBgRunning.value) return
+  try {
+    await api.adminScrapeAllArtists()
+    scrapeBgRunning.value = true
+    scrapeBgProgress.value = { phase: 'SCANNING', done: 0, succeeded: 0 }
+    scrapeBgTimer = setInterval(pollScrapeStatus, 2000)
+  } catch (e) { await alertDialog(e.message || '启动刮削失败') }
 }
 
-async function startBatchScrape() {
-  batchScrapeAnalyzing.value = true
-  batchScrapeResults.value = []
-  batchScrapeProgress.value = 0
-  const names = batchArtists.value
+async function pollScrapeStatus() {
   try {
-    // 每次 5 个一批
-    for (let i = 0; i < names.length; i += 5) {
-      const chunk = names.slice(i, i + 5)
-      const results = await api.adminScrapeArtists(chunk)
-      batchScrapeResults.value = [...batchScrapeResults.value, ...results]
-      batchScrapeProgress.value += chunk.length
+    const s = await api.adminScrapeAllStatus()
+    scrapeBgProgress.value = s
+    if (!s.running) {
+      clearInterval(scrapeBgTimer)
+      scrapeBgTimer = null
+      scrapeBgRunning.value = false
+      await loadStats()
+      await load()
+      const msg = s.succeeded > 0 ? `刮削完成：成功 ${s.succeeded} / ${s.done} 位` : `刮削完成：共处理 ${s.done} 位`
+      await alertDialog(msg)
+    } else {
+      // 刮削进行中，同步刷新统计让"无头像"数实时减少
+      await loadStats()
     }
-    // 更新列表
-    await loadStats()
-    await load()
-  } catch (e) { await alertDialog(e.message || '批量刮削失败') }
-  finally { batchScrapeAnalyzing.value = false }
+  } catch {
+    clearInterval(scrapeBgTimer)
+    scrapeBgTimer = null
+    scrapeBgRunning.value = false
+  }
 }
+
+onUnmounted(() => { if (scrapeBgTimer) clearInterval(scrapeBgTimer) })
 
 async function syncArtists() {
   syncing.value = true
@@ -266,7 +255,7 @@ async function syncArtists() {
 
 <style scoped>
 .page-head{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:18px}
-.title-block,.head-actions,.action-btn,.toolbar>div,.modal-kicker{display:flex;align-items:center}
+.title-block,.head-actions,.action-btn,.toolbar>div{display:flex;align-items:center}
 .title-block{gap:11px}
 .title-mark{display:grid;width:38px;height:38px;place-items:center;border:1px solid #bfdbfe;border-radius:8px;background:#eff6ff;color:#2563eb}
 .page-head h1{font-size:22px;line-height:1.2}
@@ -278,6 +267,7 @@ async function syncArtists() {
 .stats-row span,.stats-row small{display:block;color:#64748b;font-size:11px}
 .stats-row strong{display:block;margin:5px 0 2px;color:#172033;font-size:22px;line-height:1}
 .stats-row small{color:#94a3b8;font-size:10px}
+.stats-row .scrape-tip{display:flex;align-items:center;gap:3px;color:#2563eb;font-size:10px}
 .filter-panel{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;padding:14px 16px;margin-bottom:16px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}
 .filter-panel label{display:flex;flex:0 0 150px;flex-direction:column;gap:6px;color:#64748b;font-size:11px}
 .filter-panel .keyword-field{flex-basis:250px}
@@ -312,32 +302,6 @@ th.action-cell{z-index:3;background:#f8fafc}
 .link{border:1px solid #dbe3ee;background:#fff;color:#2563eb}
 .primary{border:1px solid #2563eb;background:#2563eb;color:#fff}
 .secondary{border:1px solid #cbd5e1;background:#fff;color:#475569}
-.empty{text-align:center;color:#94a3b8;padding:45px}
-.mask{position:fixed;inset:0;z-index:100;display:grid;place-items:center;padding:20px;background:rgba(15,23,42,.48)}
-.modal{width:min(520px,calc(100vw - 24px));max-height:calc(100vh - 36px);display:flex;flex-direction:column;overflow:hidden;border-radius:8px;background:#fff;box-shadow:0 20px 55px rgba(15,23,42,.22)}
-.modal-head{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 20px;border-bottom:1px solid #e2e8f0}
-.modal-head h2{margin-top:5px;font-size:17px}
-.modal-head p{margin-top:5px;color:#64748b;font-size:11px}
-.modal-kicker{gap:5px;color:#2563eb;font-size:10px;font-weight:700}
-.icon-button{display:grid;width:32px;height:32px;flex:none;place-items:center;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#475569}
-.modal-actions{display:flex;justify-content:flex-end;gap:8px;padding:13px 20px;border-top:1px solid #e2e8f0;background:#f8fafc}
-.batch-loading{display:grid;place-items:center;gap:8px;min-height:180px;color:#2563eb}
-.batch-loading strong{color:#172033;font-size:14px}
-.batch-loading span{color:#94a3b8;font-size:11px}
-.batch-summary{display:flex;gap:18px;padding:13px 20px;border-bottom:1px solid #e2e8f0;color:#64748b;font-size:11px}
-.batch-summary strong{color:#172033}
-.batch-list{max-height:320px;overflow:auto;padding:8px 20px}
-.batch-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f1f5f9}
-.batch-row:last-child{border-bottom:0}
-.avatar-mini{width:28px;height:28px;border-radius:50%;overflow:hidden;display:grid;place-items:center;background:#fef3c7;flex:none;font-size:12px;font-weight:700}
-.avatar-mini img{width:100%;height:100%;object-fit:cover}
-.batch-row strong{flex:1;font-size:12px}
-.badge{display:inline-flex;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600}
-.badge.ok{background:#dcfce7;color:#15803d}
-.badge.fail{background:#f1f5f9;color:#94a3b8}
-.pager{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-top:1px solid #e2e8f0}
-.pager span,.pager button{font-size:12px}
-.pager div{display:flex;gap:8px}
 .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-@media(max-width:760px){.page-head{align-items:flex-start;flex-direction:column}.head-actions{width:100%;flex-wrap:wrap}.filter-panel label,.filter-panel .keyword-field{flex:1 1 140px}.filter-actions{width:100%}.filter-actions>*{flex:1}.modal-actions{flex-wrap:wrap}.modal-actions>*{flex:1}}
+@media(max-width:760px){.page-head{align-items:flex-start;flex-direction:column}.head-actions{width:100%;flex-wrap:wrap}.filter-panel label,.filter-panel .keyword-field{flex:1 1 140px}.filter-actions{width:100%}.filter-actions>*{flex:1}}
 </style>

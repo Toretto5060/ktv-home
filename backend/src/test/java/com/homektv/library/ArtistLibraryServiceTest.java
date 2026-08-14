@@ -2,6 +2,8 @@ package com.homektv.library;
 
 import com.homektv.domain.ArtistMetadata;
 import com.homektv.domain.Song;
+import com.homektv.musicsource.MusicSourceConfig;
+import com.homektv.musicsource.MusicSourceConfigService;
 import com.homektv.repo.ArtistMetadataRepository;
 import com.homektv.repo.SongRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -18,6 +21,7 @@ class ArtistLibraryServiceTest {
     private ArtistMetadataRepository metaRepo;
     private SongRepository songRepo;
     private ArtistScraperService scraper;
+    private MusicSourceConfigService configService;
     private ArtistLibraryService service;
 
     @BeforeEach
@@ -25,7 +29,10 @@ class ArtistLibraryServiceTest {
         metaRepo = mock(ArtistMetadataRepository.class);
         songRepo = mock(SongRepository.class);
         scraper = mock(ArtistScraperService.class);
-        service = new ArtistLibraryService(metaRepo, songRepo, scraper);
+        configService = mock(MusicSourceConfigService.class);
+        MusicSourceConfig config = new MusicSourceConfig(true, Set.of(), 20, 5, 6, 1, 0, 0.95);
+        when(configService.getConfig()).thenReturn(config);
+        service = new ArtistLibraryService(metaRepo, songRepo, scraper, configService);
     }
 
     @Test
@@ -75,7 +82,7 @@ class ArtistLibraryServiceTest {
     @Test
     void scrapeBatchFetchesAvatarAndSaves() {
         when(metaRepo.findById("歌手")).thenReturn(java.util.Optional.of(new ArtistMetadata()));
-        when(scraper.findAvatarUrl("歌手")).thenReturn("https://example.com/avatar.jpg");
+        when(scraper.findAvatarUrl("歌手")).thenReturn(new ArtistScraperService.ScrapeResult("https://example.com/avatar.jpg", null));
         when(scraper.downloadAndSave("歌手", "https://example.com/avatar.jpg")).thenReturn("avatars/歌手.jpg");
         when(songRepo.findAll()).thenReturn(List.of(song(1L, "歌手", "歌曲", "未知", 1)));
 

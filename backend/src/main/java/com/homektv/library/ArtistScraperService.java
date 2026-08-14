@@ -41,7 +41,7 @@ public class ArtistScraperService {
      * 根据系统设置配置的刮削平台依次尝试，返回第一个有效头像 URL，失败返回 null。
      * 若开关未开启或未配置任何平台则直接返回 null，不发起任何网络请求。
      */
-    public String findAvatarUrl(String artistName) {
+    public ScrapeResult findAvatarUrl(String artistName) {
         MusicSourceConfig config = configService.getConfig();
         if (!config.enabled() || config.providers().isEmpty()) {
             return null;
@@ -49,8 +49,8 @@ public class ArtistScraperService {
 
         for (MusicProvider provider : config.providers()) {
             try {
-                String url = fetchAvatar(provider, artistName, config.requestIntervalMs());
-                if (url != null) return url;
+                ScrapeResult result = fetchAvatar(provider, artistName, config.requestIntervalMs());
+                if (result != null && result.url() != null) return result;
             } catch (Exception e) {
                 log.warn("[{}] 头像搜索失败 '{}': {}", provider, artistName, e.getMessage());
             }
@@ -58,7 +58,10 @@ public class ArtistScraperService {
         return null;
     }
 
-    private String fetchAvatar(MusicProvider provider, String artistName, int intervalMs) {
+    /** 刮削结果：头像 URL 和性别（可为 null）。 */
+    public record ScrapeResult(String url, String gender) {}
+
+    private ScrapeResult fetchAvatar(MusicProvider provider, String artistName, int intervalMs) {
         sleep(intervalMs);
         return switch (provider) {
             case QQ -> tryQqMusicAvatar(artistName);
@@ -98,7 +101,7 @@ public class ArtistScraperService {
 
     // ---- QQ 音乐 ----
 
-    private String tryQqMusicAvatar(String artistName) {
+    private ScrapeResult tryQqMusicAvatar(String artistName) {
         try {
             var http = new SimpleHttp(MusicProvider.QQ);
             // 旧版接口搜歌，从歌曲结果中提取歌手 MID（新版已不返回 singer.list）
@@ -137,14 +140,14 @@ public class ArtistScraperService {
             }
             String url = "https://y.gtimg.cn/music/photo_new/T001R300x300M000" + singerMid + ".jpg";
             log.info("[QQ音乐] 找到头像 '{}' -> {}", artistName, url);
-            return url;
+            return new ScrapeResult(url, null);
         } catch (Exception e) { log.warn("[QQ音乐] 头像搜索失败 '{}': {}", artistName, e.getMessage()); }
         return null;
     }
 
     // ---- 网易云 ----
 
-    private String tryNeteaseAvatar(String artistName) {
+    private ScrapeResult tryNeteaseAvatar(String artistName) {
         try {
             var http = new SimpleHttp(MusicProvider.NETEASE);
             Map<String, Object> searchData = new LinkedHashMap<>();
@@ -166,7 +169,6 @@ public class ArtistScraperService {
             }
             String picUrl = artist.path("picUrl").asText(null);
             if (picUrl == null || picUrl.isBlank()) {
-                // fallback: use img1v1Url (lower quality but always present)
                 picUrl = artist.path("img1v1Url").asText(null);
             }
             if (picUrl == null || picUrl.isBlank()) {
@@ -174,8 +176,14 @@ public class ArtistScraperService {
                 return null;
             }
             String url = picUrl.replace("http://", "https://");
-            log.info("[网易云] 找到头像 '{}' -> {}", artistName, url);
-            return url;
+            // 性别：trans=1 为女歌手，trans=0 为男歌手（无此字段或默认算男）
+            int trans = artist.path("trans").asInt(-1);
+            String gender = switch (trans) {
+                case 1 -> "女歌手";
+                default -> "男歌手";
+            };
+            log.info("[网易云] 找到头像 '{}' -> {} (gender={})", artistName, url, gender);
+            return new ScrapeResult(url, gender);
         } catch (Exception e) { log.warn("[网易云] 头像搜索失败 '{}': {}", artistName, e.getMessage()); }
         return null;
     }
@@ -183,7 +191,7 @@ public class ArtistScraperService {
     // ---- 酷狗 ----
     // 注：酷狗 /krcserver/v1/token?method=info.get_singer 端点已下线（502），
     //     singerimg CDN 路径也已失效（404），暂无可用替代接口，故跳过。
-    private String tryKugouAvatar(String artistName) {
+    private ScrapeResult tryKugouAvatar(String artistName) {
         return null;
     }
 

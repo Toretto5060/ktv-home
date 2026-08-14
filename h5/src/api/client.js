@@ -167,6 +167,8 @@ export const api = {
   adminArtists: (params = {}) => request('/admin/artists?' + new URLSearchParams(Object.entries(params).filter(([, value]) => value !== '' && value != null)).toString()),
   adminScrapeArtist: (artist) => request('/admin/artists/scrape', { method: 'POST', body: JSON.stringify({ artist }) }),
   adminScrapeArtists: (artists) => request('/admin/artists/scrape-batch', { method: 'POST', body: JSON.stringify({ artists }) }),
+  adminScrapeAllArtists: () => request('/admin/artists/scrape-all', { method: 'POST' }),
+  adminScrapeAllStatus: () => request('/admin/artists/scrape-all/status'),
   adminUpdateArtist: (body) => request('/admin/artists', { method: 'PUT', body: JSON.stringify(body) }),
   adminSyncArtists: () => request('/admin/artists/sync', { method: 'POST' }),
   adminAiTestConfig: () => request('/admin/ai/config/test', { method: 'POST' }),

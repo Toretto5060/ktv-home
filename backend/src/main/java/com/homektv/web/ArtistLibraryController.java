@@ -40,9 +40,22 @@ public class ArtistLibraryController {
         return service.scrape(request.artist());
     }
 
+    /** 启动后台全量刮削（无头像歌手），立即返回。 */
+    @PostMapping("/scrape-all")
+    public Map<String, Object> scrapeAll() {
+        service.startBackgroundScrape();
+        return Map.of("started", true);
+    }
+
+    /** 查询后台刮削进度。 */
+    @GetMapping("/scrape-all/status")
+    public Map<String, Object> scrapeAllStatus() {
+        return service.backgroundTaskStatus();
+    }
+
     /** 批量刮削歌手头像。 */
     @PostMapping("/scrape-batch")
-    public List<Map<String, Object>> scrapeBatch(@RequestBody ScrapeBatchRequest request) {
+    public List<Map<String, Object>> scrapeBatch(@RequestBody ArtistLibraryController.ScrapeBatchRequest request) {
         List<String> artists = request == null || request.artists() == null ? List.of() : request.artists();
         return service.scrapeBatch(artists);
     }
