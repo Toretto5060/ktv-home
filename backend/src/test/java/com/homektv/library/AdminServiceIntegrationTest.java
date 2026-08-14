@@ -88,13 +88,13 @@ class AdminServiceIntegrationTest {
         fileRepo.save(adminFile(later.getId(), "/music/后来.mp3", false, "/source-music/后来.mp3"));
         fileRepo.save(adminFile(unknown.getId(), "/music/TRACK_001.mp3", false, null));
 
-        var firstPage = adminService.listAdminSongs("", "", "", 0, 2);
+        var firstPage = adminService.listAdminSongs("", "", "", "", 0, 2);
         assertThat(firstPage.getTotalElements()).isEqualTo(4);
         assertThat(firstPage.getContent()).hasSize(2);
         assertThat(firstPage.getContent()).allMatch(song -> song.filePath() != null);
-        assertThat(adminService.listAdminSongs("晴天", "", "", 0, 20).getTotalElements()).isEqualTo(1);
-        assertThat(adminService.listAdminSongs("", "", "TRANSCODED", 0, 20).getTotalElements()).isEqualTo(1);
-        assertThat(adminService.listAdminSongs("", "", "UNKNOWN", 0, 20).getTotalElements()).isEqualTo(1);
+        assertThat(adminService.listAdminSongs("晴天", "", "", "", 0, 20).getTotalElements()).isEqualTo(1);
+        assertThat(adminService.listAdminSongs("", "", "TRANSCODED", "", 0, 20).getTotalElements()).isEqualTo(1);
+        assertThat(adminService.listAdminSongs("", "", "UNKNOWN", "", 0, 20).getTotalElements()).isEqualTo(1);
     }
 
     @Test

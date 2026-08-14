@@ -6,13 +6,30 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
+import java.util.regex.Pattern;
 
 @Service
 public class MusicMetadataScrapeWorker {
-    private static final Set<String> APPLY_FIELDS = Set.of("title", "artist", "album", "releaseDate", "aliases", "cover");
+    private static final Set<String> APPLY_FIELDS = Set.of("title", "artist", "album", "releaseDate", "aliases", "cover", "language");
+    private static final Map<String, String> LANGUAGE_KEYWORDS = Map.ofEntries(
+            Map.entry("国语", "国语"),
+            Map.entry("粤语", "粤语"),
+            Map.entry("闽南", "闽南语"),
+            Map.entry("闽南语", "闽南语"),
+            Map.entry("英语", "英语"),
+            Map.entry("日语", "日语"),
+            Map.entry("韩语", "韩语"),
+            Map.entry("纯音乐", "纯音乐"),
+            Map.entry("其他", "其他"),
+            Map.entry("英文", "英语"),
+            Map.entry("日文", "日语"),
+            Map.entry("韩文", "韩语")
+    );
+    private static final Pattern FILE_PATH_CLEAN = Pattern.compile("[_\\-()（）\\[\\]【】.\\s]+");
     private final JdbcTemplate jdbc;
     private final MusicSourceSearchService searchService;
     private final MusicMetadataApplyService applyService;
@@ -83,8 +100,8 @@ public class MusicMetadataScrapeWorker {
                 return;
             }
             try {
-                applyService.apply(target.songId(), track.provider(), track.externalId(),
-                        new MusicMetadataApplyService.ApplyRequest(APPLY_FIELDS));
+                MusicMetadataApplyService.ApplyRequest request = buildApplyRequest(target.songId(), APPLY_FIELDS);
+                applyService.apply(target.songId(), track.provider(), track.externalId(), request);
                 terminal(itemId, "AUTO_APPLIED", null);
             } catch (RuntimeException ex) {
                 review(itemId, best, "自动写入未执行：" + safe(ex));
@@ -92,6 +109,37 @@ public class MusicMetadataScrapeWorker {
         } catch (Exception ex) {
             fail(itemId, safe(ex));
         }
+    }
+
+    /**
+     * 构建自动写入请求：自动检测歌曲文件名中的语种，
+     * 如果歌曲当前语种为"未知"且检测到语种关键字，则注入 language override。
+     * 语种只在未手动锁定时注入。
+     */
+    private MusicMetadataApplyService.ApplyRequest buildApplyRequest(long songId, Set<String> fields) {
+        String currentLanguage = jdbc.queryForObject(
+                "SELECT s.language FROM songs s WHERE s.id=?", String.class, songId);
+        String detectedLanguage = "未知".equals(currentLanguage) ? detectLanguageFromFilePath(songId) : null;
+        if (detectedLanguage != null) {
+            var overrides = new java.util.LinkedHashMap<String, String>();
+            overrides.put("language", detectedLanguage);
+            return new MusicMetadataApplyService.ApplyRequest(fields, overrides);
+        }
+        return new MusicMetadataApplyService.ApplyRequest(fields);
+    }
+
+    private String detectLanguageFromFilePath(long songId) {
+        String path = jdbc.queryForObject("""
+                SELECT sf.file_path FROM song_files sf
+                WHERE sf.song_id=? AND sf.valid=true
+                ORDER BY sf.priority DESC LIMIT 1
+                """, String.class, songId);
+        if (path == null || path.isBlank()) return null;
+        String clean = FILE_PATH_CLEAN.matcher(path).replaceAll(" ");
+        for (Map.Entry<String, String> entry : LANGUAGE_KEYWORDS.entrySet()) {
+            if (clean.contains(entry.getKey())) return entry.getValue();
+        }
+        return null;
     }
 
     private boolean isRunning(String batchId) {

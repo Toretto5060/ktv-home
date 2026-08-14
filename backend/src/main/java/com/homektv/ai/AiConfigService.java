@@ -120,8 +120,10 @@ public class AiConfigService {
         if (Boolean.TRUE.equals(value.enabled()) && baseUrl.isBlank())
             throw new ApiException("INVALID_AI_CONFIG", "启用 AI 时必须填写 API Base URL");
         if (!baseUrl.isBlank()) normalizeBaseUrl(baseUrl);
-        if (value.bulkModel() == null || value.bulkModel().isBlank() || value.bulkModel().length() > 200)
-            throw new ApiException("INVALID_AI_CONFIG", "批量模型 ID 不能为空且不能超过 200 个字符");
+        if (Boolean.TRUE.equals(value.enabled()) && (value.bulkModel() == null || value.bulkModel().isBlank()))
+            throw new ApiException("INVALID_AI_CONFIG", "启用 AI 时批量模型 ID 不能为空");
+        if (value.bulkModel() != null && value.bulkModel().length() > 200)
+            throw new ApiException("INVALID_AI_CONFIG", "批量模型 ID 不能超过 200 个字符");
         if (value.reasoningModel() != null && value.reasoningModel().length() > 200)
             throw new ApiException("INVALID_AI_CONFIG", "增强模型 ID 不能超过 200 个字符");
         if (value.timeoutSeconds() < 5 || value.timeoutSeconds() > 600)

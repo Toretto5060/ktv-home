@@ -20,7 +20,8 @@ import java.util.Set;
 
 @Service
 public class MusicMetadataApplyService {
-    private static final Set<String> ALLOWED_FIELDS = Set.of("title", "artist", "album", "releaseDate", "aliases", "cover");
+    private static final Set<String> ALLOWED_FIELDS = Set.of("title", "artist", "album", "releaseDate", "aliases", "cover", "language");
+    private static final Set<String> MANUAL_FIELDS = Set.of("title", "artist", "album", "releaseDate", "aliases", "language");
     private final SongRepository songRepository;
     private final MusicSourceSearchService searchService;
     private final ExternalTrackStorage storage;
@@ -63,6 +64,9 @@ public class MusicMetadataApplyService {
         });
         if (requested.contains("album")) applyText(song, "album", overrides.getOrDefault("album", track.album()), overrides.containsKey("album"), applied, skippedLocked, song::setAlbum);
         if (requested.contains("releaseDate")) applyText(song, "releaseDate", overrides.getOrDefault("releaseDate", track.releaseDate()), overrides.containsKey("releaseDate"), applied, skippedLocked, song::setReleaseDate);
+        if (requested.contains("language") && overrides.containsKey("language") && !song.isMetadataLocked("language")) {
+            song.setLanguage(overrides.get("language")); applied.add("language");
+        }
         if (requested.contains("aliases")) {
             if (song.isMetadataLocked("aliases") && !overrides.containsKey("aliases")) skippedLocked.add("aliases");
             else {
@@ -94,7 +98,7 @@ public class MusicMetadataApplyService {
         Map<String, String> requestedOverrides = request == null || request.overrides() == null ? Map.of() : request.overrides();
         Set<String> requested = request == null || request.fields() == null || request.fields().isEmpty()
                 ? new LinkedHashSet<>(requestedOverrides.keySet()) : new LinkedHashSet<>(request.fields());
-        Set<String> manualFields = Set.of("title", "artist", "album", "releaseDate", "aliases");
+        Set<String> manualFields = Set.of("title", "artist", "album", "releaseDate", "aliases", "language");
         if (requested.isEmpty() || !manualFields.containsAll(requested))
             throw new ApiException("EXTERNAL_FIELDS_INVALID", "人工填写包含不支持的字段");
         Map<String, String> overrides = sanitizeOverrides(requestedOverrides, requested);
@@ -117,6 +121,9 @@ public class MusicMetadataApplyService {
         });
         if (overrides.containsKey("album")) applyText(song, "album", overrides.get("album"), true, applied, skipped, song::setAlbum);
         if (overrides.containsKey("releaseDate")) applyText(song, "releaseDate", overrides.get("releaseDate"), true, applied, skipped, song::setReleaseDate);
+        if (overrides.containsKey("language")) {
+            song.setLanguage(overrides.get("language")); applied.add("language");
+        }
         if (overrides.containsKey("aliases")) { song.setAliases(splitAliases(overrides.get("aliases"))); applied.add("aliases"); }
         song.setFingerprint(fingerprint);
         applied.forEach(song::lockMetadata);
@@ -157,7 +164,7 @@ public class MusicMetadataApplyService {
 
     private static Map<String, String> sanitizeOverrides(Map<String, String> values, Set<String> requested) {
         if (values == null || values.isEmpty()) return Map.of();
-        Set<String> editable = Set.of("title", "artist", "album", "releaseDate", "aliases");
+        Set<String> editable = Set.of("title", "artist", "album", "releaseDate", "aliases", "language");
         Map<String, String> result = new LinkedHashMap<>();
         values.forEach((key, value) -> {
             if (!editable.contains(key) || !requested.contains(key) || value == null) return;

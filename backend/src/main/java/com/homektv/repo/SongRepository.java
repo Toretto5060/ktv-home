@@ -31,34 +31,73 @@ public interface SongRepository extends JpaRepository<Song, Long> {
 
     org.springframework.data.domain.Page<Song> findByStatus(String status, org.springframework.data.domain.Pageable pageable);
 
-    @Query("""
-            SELECT song FROM Song song
-            WHERE EXISTS (SELECT file.id FROM SongFile file WHERE file.songId = song.id AND file.valid = true)
+    @Query(value = """
+            SELECT song.* FROM songs song
+            WHERE song.id IN (
+                SELECT sf.song_id FROM song_files sf WHERE sf.valid = true
+            )
               AND (:keyword = ''
                 OR LOWER(song.title) LIKE LOWER(CONCAT('%', :keyword, '%'))
                 OR LOWER(song.artist) LIKE LOWER(CONCAT('%', :keyword, '%'))
-                OR LOWER(song.titlePy) LIKE LOWER(CONCAT('%', :keyword, '%'))
-                OR LOWER(song.titleInit) LIKE LOWER(CONCAT('%', :keyword, '%'))
-                OR LOWER(song.artistPy) LIKE LOWER(CONCAT('%', :keyword, '%'))
-                OR LOWER(song.artistInit) LIKE LOWER(CONCAT('%', :keyword, '%')))
+                OR LOWER(COALESCE(song.title_py,'')) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(COALESCE(song.title_init,'')) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(COALESCE(song.artist_py,'')) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(COALESCE(song.artist_init,'')) LIKE LOWER(CONCAT('%', :keyword, '%')))
               AND (:type = ''
                 OR (:type = 'unrecognized' AND song.status = 'unrecognized')
-                OR (:type <> 'unrecognized' AND song.mediaType = :type))
+                OR (:type <> 'unrecognized' AND song.media_type = :type))
               AND (:source = ''
                 OR (:source = 'UNKNOWN' AND EXISTS (
-                    SELECT file.id FROM SongFile file
-                    WHERE file.songId = song.id AND file.valid = true AND file.sourcePath IS NULL))
+                    SELECT 1 FROM song_files f WHERE f.song_id = song.id AND f.valid = true AND f.source_path IS NULL))
                 OR (:source = 'COPIED' AND EXISTS (
-                    SELECT file.id FROM SongFile file
-                    WHERE file.songId = song.id AND file.valid = true
-                      AND file.sourcePath IS NOT NULL AND file.transcodeRequired = false))
+                    SELECT 1 FROM song_files f WHERE f.song_id = song.id AND f.valid = true
+                      AND f.source_path IS NOT NULL AND f.transcode_required = false))
                 OR (:source = 'TRANSCODED' AND EXISTS (
-                    SELECT file.id FROM SongFile file
-                    WHERE file.songId = song.id AND file.valid = true
-                      AND file.sourcePath IS NOT NULL AND file.transcodeRequired = true)))
-            """)
+                    SELECT 1 FROM song_files f WHERE f.song_id = song.id AND f.valid = true
+                      AND f.source_path IS NOT NULL AND f.transcode_required = true)))
+              AND (:scraped = '' OR :scraped IS NULL
+                OR (:scraped = 'true' AND EXISTS (
+                    SELECT 1 FROM music_metadata_scrape_items i
+                    WHERE i.song_id = song.id AND i.status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW')))
+                OR (:scraped = 'false' AND NOT EXISTS (
+                    SELECT 1 FROM music_metadata_scrape_items i
+                    WHERE i.song_id = song.id AND i.status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW'))))
+            ORDER BY song.created_at DESC
+            """, countQuery = """
+            SELECT COUNT(*) FROM songs song
+            WHERE song.id IN (
+                SELECT sf.song_id FROM song_files sf WHERE sf.valid = true
+            )
+              AND (:keyword = ''
+                OR LOWER(song.title) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(song.artist) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(COALESCE(song.title_py,'')) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(COALESCE(song.title_init,'')) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(COALESCE(song.artist_py,'')) LIKE LOWER(CONCAT('%', :keyword, '%'))
+                OR LOWER(COALESCE(song.artist_init,'')) LIKE LOWER(CONCAT('%', :keyword, '%')))
+              AND (:type = ''
+                OR (:type = 'unrecognized' AND song.status = 'unrecognized')
+                OR (:type <> 'unrecognized' AND song.media_type = :type))
+              AND (:source = ''
+                OR (:source = 'UNKNOWN' AND EXISTS (
+                    SELECT 1 FROM song_files f WHERE f.song_id = song.id AND f.valid = true AND f.source_path IS NULL))
+                OR (:source = 'COPIED' AND EXISTS (
+                    SELECT 1 FROM song_files f WHERE f.song_id = song.id AND f.valid = true
+                      AND f.source_path IS NOT NULL AND f.transcode_required = false))
+                OR (:source = 'TRANSCODED' AND EXISTS (
+                    SELECT 1 FROM song_files f WHERE f.song_id = song.id AND f.valid = true
+                      AND f.source_path IS NOT NULL AND f.transcode_required = true)))
+              AND (:scraped = '' OR :scraped IS NULL
+                OR (:scraped = 'true' AND EXISTS (
+                    SELECT 1 FROM music_metadata_scrape_items i
+                    WHERE i.song_id = song.id AND i.status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW')))
+                OR (:scraped = 'false' AND NOT EXISTS (
+                    SELECT 1 FROM music_metadata_scrape_items i
+                    WHERE i.song_id = song.id AND i.status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW'))))
+            """, nativeQuery = true)
     Page<Song> searchAdminSongs(@Param("keyword") String keyword,
                                 @Param("type") String type,
                                 @Param("source") String source,
+                                @Param("scraped") String scraped,
                                 Pageable pageable);
 }

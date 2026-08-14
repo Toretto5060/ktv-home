@@ -18,6 +18,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -43,11 +44,13 @@ public class AdminService {
     private final QueueItemRepository queueRepo;
     private final PlayerStateRepository playerRepo;
     private final AppProperties props;
+    private final JdbcTemplate jdbc;
 
     public AdminService(SongRepository songRepo, SongFileRepository fileRepo,
                         PlayHistoryRepository historyRepo, WsBroadcaster broadcaster,
                         AssetWriter assetWriter, QueueItemRepository queueRepo,
-                        PlayerStateRepository playerRepo, AppProperties props) {
+                        PlayerStateRepository playerRepo, AppProperties props,
+                        JdbcTemplate jdbc) {
         this.songRepo = songRepo;
         this.fileRepo = fileRepo;
         this.historyRepo = historyRepo;
@@ -56,6 +59,7 @@ public class AdminService {
         this.queueRepo = queueRepo;
         this.playerRepo = playerRepo;
         this.props = props;
+        this.jdbc = jdbc;
     }
 
     /** 仪表盘统计（P2.1） */
@@ -84,19 +88,28 @@ public class AdminService {
     }
 
     @Transactional(readOnly = true)
-    public Page<AdminSongDto> listAdminSongs(String keyword, String type, String source, int page, int size) {
+    public Page<AdminSongDto> listAdminSongs(String keyword, String type, String source, String scraped, int page, int size) {
         int safeSize = Math.max(1, Math.min(size, 200));
         int safePage = Math.max(0, page);
         Pageable pageable = PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "createdAt"));
         Page<Song> songs = songRepo.searchAdminSongs(normalizeFilter(keyword), normalizeFilter(type),
-                normalizeFilter(source), pageable);
+                normalizeFilter(source), normalizeFilter(scraped), pageable);
         List<Long> songIds = songs.getContent().stream().map(Song::getId).toList();
         Map<Long, SongFile> primaryFiles = new LinkedHashMap<>();
+        Set<Long> scrapedSongIds = new java.util.HashSet<>();
         if (!songIds.isEmpty()) {
             fileRepo.findBySongIdInAndValidTrueOrderByPriorityDesc(songIds)
                     .forEach(file -> primaryFiles.putIfAbsent(file.getSongId(), file));
+            scrapedSongIds.addAll(batchScrapedSongIds(songIds));
         }
-        return songs.map(song -> AdminSongDto.from(song, primaryFiles.get(song.getId())));
+        return songs.map(song -> AdminSongDto.from(song, primaryFiles.get(song.getId()), scrapedSongIds.contains(song.getId())));
+    }
+
+    private List<Long> batchScrapedSongIds(List<Long> songIds) {
+        if (songIds.isEmpty()) return List.of();
+        String placeholders = String.join(",", java.util.Collections.nCopies(songIds.size(), "?"));
+        String sql = "SELECT DISTINCT song_id FROM music_metadata_scrape_items WHERE song_id IN (%s) AND status IN ('AUTO_APPLIED','MANUAL_APPLIED','REVIEW')".formatted(placeholders);
+        return jdbc.query(sql, (rs, index) -> rs.getLong(1), songIds.toArray());
     }
 
     @Transactional(readOnly = true)

@@ -196,11 +196,13 @@ public class MusicMetadataScrapeService {
 
     private Set<Long> alreadyScrapedSongIds(List<Long> songIds) {
         if (songIds.isEmpty()) return Set.of();
+        // REVIEW 状态不视为"已刮削"——用户可能只是暂存了候选还没确认，
+        // 重新发起任务时应保留候选项，避免历史数据被覆盖。
         String placeholders = String.join(",", java.util.Collections.nCopies(songIds.size(), "?"));
         String sql = """
                 SELECT DISTINCT song_id FROM (
                     SELECT song_id FROM music_metadata_scrape_items
-                    WHERE status IN ('AUTO_APPLIED','REVIEW','MANUAL_APPLIED','FAILED')
+                    WHERE status IN ('AUTO_APPLIED','MANUAL_APPLIED','FAILED')
                     UNION ALL
                     SELECT song_id FROM song_external_matches WHERE status='APPLIED'
                 ) scraped WHERE song_id IN (%s)

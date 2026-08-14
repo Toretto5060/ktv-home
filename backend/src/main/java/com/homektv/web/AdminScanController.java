@@ -266,9 +266,10 @@ public class AdminScanController {
     public Map<String, Object> listSongs(@RequestParam(defaultValue = "") String keyword,
                                          @RequestParam(defaultValue = "") String type,
                                          @RequestParam(defaultValue = "") String source,
+                                         @RequestParam(defaultValue = "") String scraped,
                                          @RequestParam(defaultValue = "0") int page,
                                          @RequestParam(defaultValue = "20") int size) {
-        Page<AdminSongDto> p = adminService.listAdminSongs(keyword, type, source, page, size);
+        Page<AdminSongDto> p = adminService.listAdminSongs(keyword, type, source, scraped, page, size);
         return Map.of(
                 "content", p.getContent(),
                 "total", p.getTotalElements(),
