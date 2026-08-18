@@ -12,8 +12,11 @@
         <button class="secondary action-btn" :disabled="loading" @click="load">
           <RefreshCw :size="15" :class="{spin: loading}" />刷新
         </button>
-        <button class="secondary action-btn" :disabled="loading || noAvatarCount === 0" @click="startBackgroundScrape">
-          <Download :size="15" :class="{spin: scrapeBgRunning}" />批量刮削头像
+        <button class="secondary action-btn" :disabled="loading || (!scrapeBgRunning && noAvatarCount === 0)" @click="scrapeBgRunning ? (scrapeBgPaused ? resumeBackgroundScrape() : pauseBackgroundScrape()) : startBackgroundScrape()">
+          <Pause v-if="scrapeBgRunning && !scrapeBgPaused" :size="15" />
+          <Play v-else-if="scrapeBgRunning && scrapeBgPaused" :size="15" />
+          <Download v-else :size="15" />
+          {{ scrapeBgRunning ? (scrapeBgPaused ? '继续刮削' : '暂停刮削') : '批量刮削头像' }}
         </button>
         <button class="secondary action-btn" :disabled="loading" @click="syncArtists">
           <RefreshCw :size="15" :class="{spin: syncing}" />同步清理
@@ -22,7 +25,7 @@
     </header>
 
     <section class="stats-row">
-      <article><span>歌手总数</span><strong>{{ total }}</strong><small>数据库中</small></article>
+      <article><span>歌手总数</span><strong>{{ stats.total }}</strong><small>数据库中</small></article>
       <article><span>有头像</span><strong>{{ hasAvatarCount }}</strong><small>已刮削</small></article>
       <article>
         <span>无头像</span><strong>{{ noAvatarCount }}</strong>
@@ -71,7 +74,7 @@
 
     <section class="table-panel">
       <div class="toolbar">
-        <div><strong>歌手列表</strong><span>共 {{ total }} 位</span></div>
+        <div><strong>歌手列表</strong><span>共 {{ listTotal }} 位</span></div>
         <small>点击「刮削头像」从平台下载；直接下拉编辑歌手类型。</small>
       </div>
       <div class="table-scroll">
@@ -103,7 +106,7 @@
                   <option value="未知">未知</option>
                 </select>
               </td>
-              <td><strong class="count">{{ artist.songCount }}</strong><small>首歌曲</small></td>
+              <td><strong class="count clickable" @click="goToLibrary(artist.name)">{{ artist.songCount }}</strong><small>首歌曲</small></td>
               <td class="samples-cell">
                 <span v-for="song in (artist.songs || [])" :key="song.id" class="sample-chip">{{ song.title }}</span>
                 <span v-if="!artist.songs || !artist.songs.length" class="no-samples">—</span>
@@ -129,12 +132,15 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ChevronDown, Download, RefreshCw, UsersRound } from 'lucide-vue-next'
+import { useRouter } from 'vue-router'
+import { ChevronDown, Download, Pause, Play, RefreshCw, UsersRound } from 'lucide-vue-next'
 import api from '../../api/client'
 import AdminLayout from './AdminLayout.vue'
 import { alertDialog } from '../../composables/useDialog'
 
-const artists = ref([]), loading = ref(false), total = ref(0), page = ref(0), totalPages = ref(1)
+const router = useRouter()
+const artists = ref([]), loading = ref(false), page = ref(0), totalPages = ref(1)
+const listTotal = ref(0)
 const stats = ref({ total: 0, hasAvatar: 0, noAvatar: 0 })
 const filters = reactive({ keyword: '', gender: '', avatar: '' })
 const scrapeLoading = ref({})
@@ -142,6 +148,7 @@ const syncing = ref(false)
 
 // 后台刮削
 const scrapeBgRunning = ref(false)
+const scrapeBgPaused = ref(false)
 const scrapeBgProgress = ref({})
 let scrapeBgTimer = null
 
@@ -165,7 +172,6 @@ async function loadStats() {
   try {
     const r = await api.adminArtistStats()
     stats.value = r || { total: 0, hasAvatar: 0, noAvatar: 0 }
-    total.value = r.total || 0
   } catch {}
 }
 async function load() {
@@ -177,10 +183,8 @@ async function load() {
     if (filters.avatar) params.avatar = filters.avatar
     const r = await api.adminArtists(params)
     artists.value = r.content || []
-    if (page.value === 0) {
-      total.value = r.total || 0
-      totalPages.value = r.totalPages || 1
-    }
+    listTotal.value = r.total || 0
+    totalPages.value = r.totalPages || 1
   } catch (e) {
     await alertDialog(e.message || '歌手列表加载失败')
   } finally { loading.value = false }
@@ -201,7 +205,15 @@ async function scrapeArtist(name) {
   try {
     const result = await api.adminScrapeArtist(name)
     const a = artists.value.find(x => x.name === name)
-    if (a) { a.avatarUrl = result.avatarUrl; a.gender = result.gender }
+    if (a) {
+      const hadNoAvatar = !a.avatarUrl
+      a.avatarUrl = result.avatarUrl
+      a.gender = result.gender
+      if (hadNoAvatar && result.avatarUrl) {
+        stats.value.noAvatar = Math.max(0, stats.value.noAvatar - 1)
+        stats.value.hasAvatar++
+      }
+    }
   } catch (e) { await alertDialog(e.message || '刮削失败') }
   finally { scrapeLoading.value[name] = false }
 }
@@ -220,23 +232,39 @@ async function pollScrapeStatus() {
   try {
     const s = await api.adminScrapeAllStatus()
     scrapeBgProgress.value = s
+    scrapeBgPaused.value = s.paused === true
     if (!s.running) {
       clearInterval(scrapeBgTimer)
       scrapeBgTimer = null
       scrapeBgRunning.value = false
+      scrapeBgPaused.value = false
       await loadStats()
       await load()
       const msg = s.succeeded > 0 ? `刮削完成：成功 ${s.succeeded} / ${s.done} 位` : `刮削完成：共处理 ${s.done} 位`
       await alertDialog(msg)
     } else {
-      // 刮削进行中，同步刷新统计让"无头像"数实时减少
       await loadStats()
     }
   } catch {
     clearInterval(scrapeBgTimer)
     scrapeBgTimer = null
     scrapeBgRunning.value = false
+    scrapeBgPaused.value = false
   }
+}
+
+async function pauseBackgroundScrape() {
+  try {
+    await api.adminScrapeAllPause()
+    scrapeBgPaused.value = true
+  } catch (e) { await alertDialog(e.message || '暂停失败') }
+}
+
+async function resumeBackgroundScrape() {
+  try {
+    await api.adminScrapeAllResume()
+    scrapeBgPaused.value = false
+  } catch (e) { await alertDialog(e.message || '继续失败') }
 }
 
 onUnmounted(() => { if (scrapeBgTimer) clearInterval(scrapeBgTimer) })
@@ -250,6 +278,10 @@ async function syncArtists() {
     await load()
   } catch (e) { await alertDialog(e.message || '同步失败') }
   finally { syncing.value = false }
+}
+
+function goToLibrary(artistName) {
+  router.push({ name: 'admin-ktv-library', query: { artist: artistName } })
 }
 </script>
 
@@ -289,6 +321,8 @@ td{color:#334155;font-size:12px}
 td strong,td small{display:block}
 td small{margin-top:4px;color:#94a3b8;font-size:10px}
 .count{font-size:14px}
+.count.clickable{cursor:pointer;color:#2563eb}
+.count.clickable:hover{text-decoration:underline}
 .action-cell{position:sticky;right:0;z-index:2;width:140px;min-width:140px;background:#fff;border-left:1px solid #e2e8f0;box-shadow:-10px 0 14px -14px rgba(15,23,42,.55)}
 th.action-cell{z-index:3;background:#f8fafc}
 .samples-cell{max-width:300px}
@@ -298,6 +332,8 @@ th.action-cell{z-index:3;background:#f8fafc}
 .avatar-cell{width:42px;height:42px;border-radius:50%;overflow:hidden}
 .artist-avatar{width:100%;height:100%;object-fit:cover;border-radius:50%}
 .avatar-placeholder{width:42px;height:42px;display:grid;place-items:center;border-radius:50%;background:var(--gold-glow,#fef3c7);color:var(--gold,#d97706);font-weight:700;font-size:16px}
+.pager{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;color:#64748b;font-size:12px;border-top:1px solid #e2e8f0}
+.pager div{display:flex;gap:8px}
 .link,.primary,.secondary{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 11px;border-radius:6px;font-size:11px;font-weight:600;gap:5px}
 .link{border:1px solid #dbe3ee;background:#fff;color:#2563eb}
 .primary{border:1px solid #2563eb;background:#2563eb;color:#fff}

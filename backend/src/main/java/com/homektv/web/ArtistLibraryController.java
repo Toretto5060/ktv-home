@@ -53,6 +53,20 @@ public class ArtistLibraryController {
         return service.backgroundTaskStatus();
     }
 
+    /** 暂停后台刮削。 */
+    @PostMapping("/scrape-all/pause")
+    public Map<String, Object> scrapeAllPause() {
+        service.pauseBackgroundScrape();
+        return Map.of("paused", true);
+    }
+
+    /** 继续后台刮削。 */
+    @PostMapping("/scrape-all/resume")
+    public Map<String, Object> scrapeAllResume() {
+        service.resumeBackgroundScrape();
+        return Map.of("resumed", true);
+    }
+
     /** 批量刮削歌手头像。 */
     @PostMapping("/scrape-batch")
     public List<Map<String, Object>> scrapeBatch(@RequestBody ArtistLibraryController.ScrapeBatchRequest request) {

@@ -56,6 +56,21 @@ public class ArtistLibraryService {
         return task.status();
     }
 
+    /** 暂停后台刮削。 */
+    public void pauseBackgroundScrape() {
+        ScrapeAllTask task = backgroundTask.get();
+        if (task == null || !task.isRunning()) return;
+        task.pause();
+    }
+
+    /** 继续后台刮削。 */
+    public void resumeBackgroundScrape() {
+        ScrapeAllTask task = backgroundTask.get();
+        if (task == null) return;
+        task.resume();
+        synchronized (task) { task.notifyAll(); }
+    }
+
     /**
      * 分页列表：从 songs 表聚合所有歌手，合并 artist_metadata 中的头像和性别。
      * @param page 页码（从 0 开始）
@@ -74,12 +89,16 @@ public class ArtistLibraryService {
         if (task != null && task.isRunning()) {
             int skipDone = task.getDone();
             if (skipDone > 0) {
-                // 收集已完成刮削的artist名（按扫描顺序前skipDone个无头像artist）
+                // 收集已完成刮削的artist名（按扫描顺序前skipDone个无头像artist，用第一位歌手名去重）
                 Set<String> unscrapedNames = validSongs().stream()
-                        .map(Song::getArtist).filter(Objects::nonNull).filter(a -> !a.isBlank())
+                        .map(s -> {
+                            String[] parts = splitArtistNames(s.getArtist());
+                            return parts.length > 0 ? parts[0].trim() : s.getArtist();
+                        })
+                        .filter(a -> !a.isBlank())
                         .distinct()
-                        .filter(name -> {
-                            ArtistMetadata m = metaMap.get(name);
+                        .filter(key -> {
+                            ArtistMetadata m = metaMap.get(key);
                             return m == null || m.getAvatarUrl() == null || m.getAvatarUrl().isBlank();
                         })
                         .limit(skipDone)
@@ -91,23 +110,41 @@ public class ArtistLibraryService {
         final Set<String> finalSkipSet = skipSet;
 
         List<Map<String, Object>> all = validSongs().stream()
-                .collect(Collectors.groupingBy(Song::getArtist))
+                // 按第一位歌手名分组，合并所有变体（A, A/B, A&C 都归到 A）
+                .collect(Collectors.groupingBy(s -> {
+                    String[] parts = splitArtistNames(s.getArtist());
+                    return parts.length > 0 ? parts[0].trim() : s.getArtist();
+                }))
                 .entrySet().stream()
-                .filter(e -> q.isBlank() || e.getKey().toLowerCase(Locale.ROOT).contains(q))
-                .filter(e -> !finalSkipSet.contains(e.getKey()))
+                .filter(e -> !e.getKey().isBlank())
+                .filter(e -> {
+                    // 关键词匹配：搜索任意原始歌手名
+                    if (!q.isBlank()) {
+                        boolean match = e.getValue().stream()
+                                .anyMatch(s -> s.getArtist().toLowerCase(Locale.ROOT).contains(q));
+                        if (!match) return false;
+                    }
+                    return !finalSkipSet.contains(e.getKey());
+                })
                 .map(e -> {
-                    String name = e.getKey();
+                    String firstArtist = e.getKey();
                     List<Song> songs = e.getValue();
-                    ArtistMetadata meta = metaMap.get(name);
+                    // 显示名：优先取没有分隔符的原始歌手名（单歌手），否则取第一位歌手名
+                    String displayName = songs.stream()
+                            .map(Song::getArtist)
+                            .filter(a -> !a.contains("/") && !a.contains("&") && !a.contains("，") && !a.contains(","))
+                            .findFirst()
+                            .orElse(firstArtist);
+                    ArtistMetadata meta = metaMap.get(firstArtist);
                     String g = meta != null ? meta.getGender() : dominantGender(songs);
                     if (gender != null && !gender.isBlank() && !gender.equals(g)) return null;
                     boolean hasAvatar = meta != null && meta.getAvatarUrl() != null && !meta.getAvatarUrl().isBlank();
                     if (avatar != null && !avatar && hasAvatar) return null;
                     Map<String, Object> map = new LinkedHashMap<>();
-                    map.put("name", name);
+                    map.put("name", displayName);
                     map.put("gender", g);
                     map.put("songCount", songs.size());
-                    map.put("avatarUrl", hasAvatar ? "/api/artist-avatar/" + urlEncode(name) : "");
+                    map.put("avatarUrl", hasAvatar ? "/api/artist-avatar/" + urlEncode(firstArtist) : "");
                     map.put("hasAvatar", hasAvatar);
                     map.put("songs", representativeSongs(songs));
                     return map;
@@ -136,18 +173,32 @@ public class ArtistLibraryService {
     /**
      * 全量统计：有头像歌手数、无头像歌手数、歌手总数。
      * 不分页，用于页面顶部统计栏。
+     * 按第一位歌手名分组，合并变体（如 A 和 A/B 都归到 A）。
      * 如果后台刮削任务正在运行，"无头像"数会减去已完成的artist数（他们还没落库但即将落库）。
      */
     public Map<String, Object> stats() {
         Map<String, ArtistMetadata> metaMap = new HashMap<>();
         metaRepo.findAll().forEach(m -> metaMap.put(m.getArtistName(), m));
 
-        long total = validSongs().stream().map(Song::getArtist).distinct().count();
-        long hasAvatar = validSongs().stream()
-                .collect(Collectors.groupingBy(Song::getArtist))
+        // 按第一位歌手名分组
+        Map<String, List<Song>> grouped = validSongs().stream()
+                .collect(Collectors.groupingBy(s -> {
+                    String[] parts = splitArtistNames(s.getArtist());
+                    return parts.length > 0 ? parts[0].trim() : s.getArtist();
+                }))
                 .entrySet().stream()
-                .filter(e -> {
-                    ArtistMetadata meta = metaMap.get(e.getKey());
+                .filter(e -> !e.getKey().isBlank())
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        long total = grouped.size();
+        long hasAvatar = grouped.values().stream()
+                .filter(songs -> {
+                    if (songs.isEmpty()) return false;
+                    String firstArtist = songs.get(0).getArtist();
+                    String[] parts = splitArtistNames(firstArtist);
+                    String key = parts.length > 0 ? parts[0].trim() : firstArtist;
+                    if (key.isEmpty()) return false;
+                    ArtistMetadata meta = metaMap.get(key);
                     return meta != null && meta.getAvatarUrl() != null && !meta.getAvatarUrl().isBlank();
                 })
                 .count();
@@ -210,16 +261,19 @@ public class ArtistLibraryService {
                 String relPath = null;
                 if (result != null && result.url() != null) {
                     relPath = scraper.downloadAndSave(name, result.url());
-                    if (relPath != null) meta.setSource("SCRAPED");
-                    // 优先应用刮削到的性别（仅当当前为"未知"或性别确实不同）
-                    if (result.gender() != null && !result.gender().isBlank()) {
-                        String cur = meta.getGender();
-                        if (cur == null || "未知".equals(cur) || !GENDERS.contains(cur)) {
-                            meta.setGender(result.gender());
-                        }
+                }
+                // 只在下载成功时更新头像，避免覆盖已有数据
+                if (relPath != null) {
+                    meta.setAvatarUrl(relPath);
+                    meta.setSource("SCRAPED");
+                }
+                // 性别更新逻辑：仅当刮削到性别且当前为"未知"时才更新
+                if (result != null && result.gender() != null && !result.gender().isBlank()) {
+                    String cur = meta.getGender();
+                    if (cur == null || "未知".equals(cur) || !GENDERS.contains(cur)) {
+                        meta.setGender(result.gender());
                     }
                 }
-                meta.setAvatarUrl(relPath);
                 metaRepo.save(meta);
                 results.add(toMap(name, meta));
             } catch (Exception e) {
@@ -256,26 +310,43 @@ public class ArtistLibraryService {
                 .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse("未知");
     }
 
+    /** 按 "/" "&" "，" 等分隔符拆分组合歌手名，返回各独立歌手名列表。 */
+    private String[] splitArtistNames(String artist) {
+        if (artist == null || artist.isBlank()) return new String[0];
+        return artist.split("[\\\\/&,\uff0c，；;、\t]+");
+    }
+
     // ---- 后台刮削任务 ----
 
     /** 后台全量刮削任务状态。 */
     private static class ScrapeAllTask {
         private volatile boolean running = false;
+        private volatile boolean paused = false;
         private volatile int total = 0;
         private volatile int done = 0;
         private volatile int succeeded = 0;
         private volatile String phase = "IDLE";
 
-        synchronized void start() { this.running = true; this.phase = "SCANNING"; }
+        synchronized void start() { this.running = true; this.paused = false; this.phase = "SCANNING"; }
         synchronized void setTotal(int n) { this.total = n; this.phase = "SCRAPING"; }
         synchronized void markDone(boolean ok) { this.done++; if (ok) this.succeeded++; }
-        synchronized void finish() { this.running = false; this.phase = "DONE"; }
+        synchronized void finish() { this.running = false; this.paused = false; this.phase = "DONE"; }
         synchronized boolean isRunning() { return this.running; }
+        synchronized boolean isPaused() { return this.paused; }
+        synchronized void pause() { this.paused = true; this.phase = "PAUSED"; }
+        synchronized void resume() { this.paused = false; this.phase = "SCRAPING"; }
+        synchronized boolean waitWhilePaused() {
+            while (paused) {
+                try { wait(); } catch (InterruptedException ignored) { return false; }
+            }
+            return true;
+        }
         synchronized int getDone() { return this.done; }
 
         synchronized Map<String, Object> status() {
             return Map.of(
                     "running", running,
+                    "paused", paused,
                     "phase", phase,
                     "total", total,
                     "done", done,
@@ -288,13 +359,19 @@ public class ArtistLibraryService {
         ScrapeAllTask task = backgroundTask.get();
         task.start();
         try {
-            Set<String> unscraped = validSongs().stream()
-                    .map(Song::getArtist).filter(Objects::nonNull)
-                    .filter(a -> !a.isBlank())
-                    .collect(Collectors.toSet());
+            // 收集所有需要刮削的歌手（组合歌手只取第一位）
+            Set<String> toScrapeSet = new HashSet<>();
+            validSongs().forEach(s -> {
+                String[] parts = splitArtistNames(s.getArtist());
+                if (parts.length > 0) {
+                    String first = parts[0].trim();
+                    if (!first.isBlank()) toScrapeSet.add(first);
+                }
+            });
+
             Map<String, ArtistMetadata> metaMap = new HashMap<>();
             metaRepo.findAll().forEach(m -> metaMap.put(m.getArtistName(), m));
-            List<String> toScrape = unscraped.stream()
+            List<String> toScrape = toScrapeSet.stream()
                     .filter(name -> {
                         ArtistMetadata m = metaMap.get(name);
                         return m == null || m.getAvatarUrl() == null || m.getAvatarUrl().isBlank();
@@ -307,22 +384,21 @@ public class ArtistLibraryService {
                         ArtistMetadata m = new ArtistMetadata(); m.setArtistName(name); m.setGender("未知"); return m;
                     });
                     ArtistScraperService.ScrapeResult result = scraper.findAvatarUrl(name);
+                    String relPath = null;
                     if (result != null && result.url() != null) {
-                        String relPath = scraper.downloadAndSave(name, result.url());
-                        if (relPath != null) {
-                            meta.setAvatarUrl(relPath);
-                            meta.setSource("SCRAPED");
-                            if (result.gender() != null && !result.gender().isBlank()) {
-                                String cur = meta.getGender();
-                                if (cur == null || "未知".equals(cur) || !GENDERS.contains(cur)) {
-                                    meta.setGender(result.gender());
-                                }
+                        relPath = scraper.downloadAndSave(name, result.url());
+                    }
+                    if (relPath != null) {
+                        meta.setAvatarUrl(relPath);
+                        meta.setSource("SCRAPED");
+                        if (result.gender() != null && !result.gender().isBlank()) {
+                            String cur = meta.getGender();
+                            if (cur == null || "未知".equals(cur) || !GENDERS.contains(cur)) {
+                                meta.setGender(result.gender());
                             }
-                            metaRepo.save(meta);
-                            task.markDone(true);
-                        } else {
-                            task.markDone(false);
                         }
+                        metaRepo.save(meta);
+                        task.markDone(true);
                     } else {
                         task.markDone(false);
                     }
@@ -330,6 +406,10 @@ public class ArtistLibraryService {
                     task.markDone(false);
                 }
                 try { Thread.sleep(intervalMs); } catch (InterruptedException ignored) {}
+                if (!task.waitWhilePaused()) {
+                    task.finish();
+                    return;
+                }
             }
         } finally {
             task.finish();

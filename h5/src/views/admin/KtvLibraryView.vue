@@ -79,8 +79,8 @@
  * KTV Library Management Page — manages the official playable song library,
  * supports filtering, editing, and deleting songs.
  */
-import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { Check, ChevronDown, ListPlus, RefreshCw, Tags, Trash2, X } from 'lucide-vue-next'
 import api from '../../api/client'
 import AdminLayout from './AdminLayout.vue'
@@ -88,6 +88,7 @@ import { alertDialog, confirmDialog } from '../../composables/useDialog'
 /** 歌曲列表、总数、当前页、总页数、已选集合 / Song list, total, page, total pages, selected set */
 const songs=ref([]),total=ref(0),page=ref(0),totalPages=ref(1),selected=ref(new Set())
 const router=useRouter()
+const route=useRoute()
 const matchingSong=ref(null),matches=ref([]),selectedMatch=ref(null),matchLoading=ref(false),applyingMatch=ref(false),applyFields=ref([])
 const scrapeOpen=ref(false),scrapeLoading=ref(false),scrapeApplying=ref(false),scrapeResults=ref([]),scrapeApplyIds=ref(new Set())
 const playlistPickerOpen=ref(false),playlistPickerSong=ref(null),playlistOptions=ref([]),playlistLoading=ref(false),playlistAddingId=ref(null)
@@ -106,7 +107,11 @@ async function load(){const r=await api.adminSongs({...filters,page:page.value,s
 /** 搜索：重置到第一页并加载 / Search: reset to first page and load */
 function search(){page.value=0;load()}
 /** 重置筛选条件并搜索 / Reset filter criteria and search */
-function reset(){Object.assign(filters,{keyword:'',type:'',source:'',scraped:''});search()}
+function reset(){
+  Object.assign(filters,{keyword:'',type:'',source:'',scraped:''})
+  router.replace({ name: 'admin-ktv-library' })
+  search()
+}
 function goScrape(ids=[],review=false){router.push({name:'admin-metadata-scrape',query:ids.length?{songIds:ids.join(','),...(review?{review:'1'}:{})}:undefined})}
 async function openPlaylistPicker(song){playlistPickerSong.value=song;playlistPickerOpen.value=true;playlistLoading.value=true;try{playlistOptions.value=await api.adminAiPlaylists()}catch(e){await alertDialog(e.message||'歌单加载失败')}finally{playlistLoading.value=false}}
 function closePlaylistPicker(){if(!playlistAddingId.value)playlistPickerOpen.value=false}
@@ -188,7 +193,25 @@ function typeText(v){return{KTV_VIDEO:'KTV版',MV:'MV版',AUDIO:'音频版'}[v]|
 function typeClass(v){return v==='KTV_VIDEO'?'green':v==='MV'?'blue':'neutral'}
 /** 导入来源文本映射 / Import source text mapping */
 function sourceText(v){return{COPIED:'扫描直入',TRANSCODED:'转码入库',UNKNOWN:'历史曲库'}[v]||'历史曲库'}
-onMounted(load)
+/** 从 URL 参数初始化筛选条件 */
+function initFromQuery(){
+  if(route.query.artist){
+    filters.keyword=route.query.artist
+  }
+  if(route.query.type) filters.type=route.query.type
+  if(route.query.source) filters.source=route.query.source
+  if(route.query.scraped) filters.scraped=route.query.scraped
+}
+/** 监听路由变化，同步 URL 参数到筛选条件 */
+watch(()=>route.query,(query)=>{
+  if(query.artist!==undefined) filters.keyword=query.artist||''
+  if(query.type!==undefined) filters.type=query.type||''
+  if(query.source!==undefined) filters.source=query.source||''
+  if(query.scraped!==undefined) filters.scraped=query.scraped||''
+  page.value=0
+  load()
+})
+onMounted(()=>{initFromQuery();load()})
 </script>
 
 <style scoped>

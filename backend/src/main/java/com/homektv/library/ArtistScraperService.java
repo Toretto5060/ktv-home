@@ -176,14 +176,10 @@ public class ArtistScraperService {
                 return null;
             }
             String url = picUrl.replace("http://", "https://");
-            // 性别：trans=1 为女歌手，trans=0 为男歌手（无此字段或默认算男）
-            int trans = artist.path("trans").asInt(-1);
-            String gender = switch (trans) {
-                case 1 -> "女歌手";
-                default -> "男歌手";
-            };
-            log.info("[网易云] 找到头像 '{}' -> {} (gender={})", artistName, url, gender);
-            return new ScrapeResult(url, gender);
+            // 网易云搜索 API 不返回歌手性别字段，trans 是翻译状态而非性别，
+            // 为避免误判，返回 null 让调用方使用其他平台的性别或保持原值
+            log.info("[网易云] 找到头像 '{}' -> {}", artistName, url);
+            return new ScrapeResult(url, null);
         } catch (Exception e) { log.warn("[网易云] 头像搜索失败 '{}': {}", artistName, e.getMessage()); }
         return null;
     }
