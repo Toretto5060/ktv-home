@@ -281,16 +281,16 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             val rawScale = screenHeight / baseHeight
             val scale = 0.85f + (rawScale * 0.15f)
             if (rawScale < 1f) {
-                // 顶部 Logo - 只轻微缩小
+                // 顶部 Logo
                 binding.imgStandbyLogo?.let {
                     val lp = it.layoutParams
-                    lp.width = (64 * scale).toInt()
-                    lp.height = (48 * scale).toInt()
+                    lp.width = (120 * scale).toInt()
+                    lp.height = (120 * scale).toInt()
                     it.layoutParams = lp
                 }
                 // 品牌名称
                 binding.txtBrandName?.let {
-                    (it as? TextView)?.textSize = 31f * scale
+                    (it as? TextView)?.textSize = 26f * scale
                 }
                 // 切换按钮
                 binding.btnExitServer?.let {
@@ -310,11 +310,11 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 binding.txtQueueCount?.let {
                     (it as? TextView)?.textSize = 15f * scale
                 }
-                // 主标题 "今晚开唱" - 适中大小
-                binding.txtStandbyWelcome.textSize = 48f
+                // 主标题 "今晚开唱" - 缩小
+                binding.txtStandbyWelcome.textSize = 34f
                 // 副标题
                 binding.txtStandbySubtitle?.let {
-                    (it as? TextView)?.textSize = 20f * scale
+                    (it as? TextView)?.textSize = 22f * scale
                 }
                 // 统计信息
                 listOf(binding.txtLibraryStat, binding.txtPlayedStat).forEach {
@@ -349,7 +349,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 // 底部推荐歌单
                 binding.recommendationRow?.let { row ->
                     row.layoutParams = row.layoutParams.apply {
-                        height = (58 * scale).toInt()
+                        height = (82 * scale).toInt()
                     }
                 }
                 // 底部播放栏 - 专辑封面
@@ -1082,10 +1082,10 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(6), dp(4), dp(8), dp(4))
+                setPadding(dp(5), dp(3), dp(6), dp(3))
                 setBackgroundResource(R.drawable.recommendation_card)
             }
-            val params = LinearLayout.LayoutParams(0, dp(58), 1f).apply { marginEnd = dp(8) }
+            val params = LinearLayout.LayoutParams(0, dp(82), 1f).apply { marginEnd = dp(8) }
             binding.recommendationRow.addView(card, params)
 
             val cover = ImageView(this).apply {
@@ -1094,7 +1094,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 setImageResource(R.drawable.home_ktv_logo)
                 recommendationCovers[song.id]?.let(::setImageBitmap)
             }
-            card.addView(cover, LinearLayout.LayoutParams(dp(50), dp(50)))
+            card.addView(cover, LinearLayout.LayoutParams(dp(34), dp(34)))
 
             val labels = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL

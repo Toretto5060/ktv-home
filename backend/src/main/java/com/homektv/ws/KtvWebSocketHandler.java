@@ -74,6 +74,7 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
      */
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+        broadcaster.touchSession(session.getId());
         JsonNode node = mapper.readTree(message.getPayload());
         String type = node.path("type").asText("");
 

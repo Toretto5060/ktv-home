@@ -28,9 +28,9 @@ docker buildx inspect --bootstrap
 docker buildx build \
   --progress=plain \
   --platform linux/amd64,linux/arm64 \
-  --build-arg KTV_RELEASE_VERSION=0.1.10 \
-  --build-arg KTV_RELEASE_VERSION_CODE=11 \
-  -t toretto5060/ktv-home:0.1.10 \
+  --build-arg KTV_RELEASE_VERSION=0.1.11 \
+  --build-arg KTV_RELEASE_VERSION_CODE=12 \
+  -t toretto5060/ktv-home:0.1.11 \
   -t toretto5060/ktv-home:latest \
   --push \
   -f backend/Dockerfile \
@@ -43,6 +43,7 @@ docker buildx build \
 ```bash
 cd android-tv
 ./gradlew testDebugUnitTest assembleDebug
+./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
 ```
 
 ## 界面预览

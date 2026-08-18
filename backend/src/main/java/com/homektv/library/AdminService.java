@@ -74,7 +74,7 @@ public class AdminService {
                 songRepo.countByMediaType(MediaClassifier.AUDIO),
                 songRepo.countByStatus("unrecognized"),
                 historyRepo.count(),
-                broadcaster.sessionCount(),
+                (int) broadcaster.h5Count(),
                 null, null   // 播放状态由前端另查 /queue，避免重复
         );
     }

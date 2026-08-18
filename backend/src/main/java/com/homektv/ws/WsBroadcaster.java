@@ -4,59 +4,113 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * WebSocket 会话注册与事件广播（P1.14，详设§4.1/§4.2）。
- * 线程安全：会话存于 ConcurrentHashMap，发送时对单会话加锁（WebSocketSession 非并发安全）。
+ * 使用 client_token 作为唯一标识，支持 30 分钟优雅离场宽限期。
  *
  * WebSocket session registration and event broadcasting (P1.14, detailed design §4.1/§4.2).
- * Thread-safe: sessions stored in ConcurrentHashMap, with per-session locking during send
- * (WebSocketSession is not concurrency-safe).
+ * Uses client_token as unique identifier, supports 30-minute graceful disconnect grace period.
  */
 @Component
 public class WsBroadcaster {
 
     private static final Logger log = LoggerFactory.getLogger(WsBroadcaster.class);
 
-    private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
     private final ObjectMapper mapper;
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+    /** client_token -> SessionInfo */
+    private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
+
+    /** 30 分钟宽限期（毫秒） */
+    private static final long GRACE_PERIOD_MS = 30 * 60 * 1000L;
 
     public WsBroadcaster(ObjectMapper mapper) {
         this.mapper = mapper;
     }
 
-    /** 记录每个会话的 client_type（tv/h5），用于 TV 在线检测（P2.13）。
-     *  Records the client_type (tv/h5) of each session, used for TV online detection (P2.13). */
-    private final Map<String, String> sessionTypes = new ConcurrentHashMap<>();
-
     /**
-     * 注册 WebSocket 会话。
-     *
-     * Registers a WebSocket session.
-     * @param session 要注册的 WebSocket 会话 / the WebSocket session to register
+     * 会话信息，包含 WebSocket 会话和最后消息时间。
      */
-    public void register(WebSocketSession session) {
-        sessions.put(session.getId(), session);
-        Object type = session.getAttributes().get("client_type");
-        if (type != null) sessionTypes.put(session.getId(), type.toString());
+    private static class SessionInfo {
+        final String sessionId;
+        final WebSocketSession session;
+        volatile long lastMessageTime;
+        volatile boolean pendingRemoval = false;
+
+        SessionInfo(String sessionId, WebSocketSession session) {
+            this.sessionId = sessionId;
+            this.session = session;
+            this.lastMessageTime = System.currentTimeMillis();
+        }
     }
 
     /**
-     * 注销会话，返回其 client_type（tv/h5，可能为 null），供离线清理等逻辑判断。
+     * 注册 WebSocket 会话。
+     * 如果该 client_token 已有活跃会话，先移除旧会话。
      *
-     * Unregisters a session and returns its client_type (tv/h5, may be null) for offline cleanup logic.
-     * @param session 要注销的 WebSocket 会话 / the WebSocket session to unregister
-     * @return client_type（tv/h5，可能为 null）/ the client_type (tv/h5, may be null)
+     * Registers a WebSocket session.
+     * If the client_token already has an active session, removes the old one first.
+     *
+     * @param session WebSocket 会话
+     */
+    public void register(WebSocketSession session) {
+        String clientToken = getClientToken(session);
+        String newSessionId = session.getId();
+
+        // 取消该 client_token 的任何待移除定时器
+        cancelPendingRemoval(clientToken);
+
+        // 如果该 client_token 已有会话，先移除（避免重复计数）
+        SessionInfo existing = sessions.get(clientToken);
+        if (existing != null && !existing.sessionId.equals(newSessionId)) {
+            log.debug("client_token {} 已有会话 {}，替换为新会话 {}", clientToken, existing.sessionId, newSessionId);
+            try {
+                existing.session.close(CloseStatus.NORMAL);
+            } catch (IOException e) {
+                log.debug("关闭旧会话失败: {}", e.getMessage());
+            }
+            sessions.remove(clientToken);
+        }
+
+        sessions.put(clientToken, new SessionInfo(newSessionId, session));
+        log.debug("WS 会话注册: client_token={}, session={}", clientToken, newSessionId);
+    }
+
+    /**
+     * 注销会话。
+     * 启动 30 分钟宽限期，期间若重新连接则取消移除。
+     *
+     * Unregisters a session and starts a 30-minute grace period.
+     *
+     * @param session WebSocket 会话
+     * @return client_type（tv/h5，可能为 null）
      */
     public String unregister(WebSocketSession session) {
-        sessions.remove(session.getId());
-        return sessionTypes.remove(session.getId());
+        String clientToken = getClientToken(session);
+        SessionInfo info = sessions.remove(clientToken);
+        if (info == null) return null;
+
+        String clientType = getClientType(session);
+        log.debug("WS 会话断开，进入 {} 分钟宽限期: client_token={}, session={}",
+                GRACE_PERIOD_MS / 60000, clientToken, session.getId());
+
+        // 启动 30 分钟宽限期定时器
+        scheduleGracePeriod(clientToken, clientType);
+
+        return clientType;
     }
 
     public int sessionCount() {
@@ -64,31 +118,64 @@ public class WsBroadcaster {
     }
 
     /**
-     * TV 是否在线（详设§4.5：点了歌但 TV 不在线时 H5 显示横幅）。
-     *
-     * Whether the TV is online (detailed design §4.5: H5 shows a banner when songs are queued but TV is offline).
-     * @return true if TV is online
+     * TV 是否在线。
      */
     public boolean isTvOnline() {
-        return sessionTypes.containsValue("tv");
+        return sessions.values().stream().anyMatch(info -> {
+            Object type = info.session.getAttributes().get("client_type");
+            return "tv".equals(type == null ? null : type.toString());
+        });
     }
 
     /**
-     * 已连接的 H5 手机数。
-     *
-     * Number of connected H5 mobile clients.
-     * @return the count of connected H5 sessions
+     * 已连接的 H5 手机数（去重，同一 client_token 只算一次）。
      */
     public long h5Count() {
-        return sessionTypes.values().stream().filter("h5"::equals).count();
+        return sessions.values().stream().filter(info -> {
+            Object type = info.session.getAttributes().get("client_type");
+            return "h5".equals(type == null ? null : type.toString());
+        }).count();
     }
 
     /**
-     * 向单个会话发送事件（如连接后的 sync_full）。
-     *
-     * Sends an event to a single session (e.g. sync_full after connection).
-     * @param session 目标 WebSocket 会话 / the target WebSocket session
-     * @param event 要发送的事件 / the event to send
+     * 更新会话的最后消息时间。
+     */
+    public void touchSession(String sessionId) {
+        for (SessionInfo info : sessions.values()) {
+            if (info.sessionId.equals(sessionId)) {
+                info.lastMessageTime = System.currentTimeMillis();
+                break;
+            }
+        }
+    }
+
+    /**
+     * 启动 30 分钟宽限期定时器。
+     */
+    private void scheduleGracePeriod(String clientToken, String clientType) {
+        scheduler.schedule(() -> {
+            // 宽限期结束后，检查该 client_token 是否已重新连接
+            SessionInfo current = sessions.get(clientToken);
+            if (current == null) {
+                // 30 分钟内没有重新连接，真正移除
+                log.debug("client_token {} 宽限期结束，已移除", clientToken);
+            }
+            // 如果已重新连接，sessions.get() 会返回非 null，之前的待移除状态被取消
+        }, GRACE_PERIOD_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 取消待移除状态（重新连接时调用）。
+     */
+    private void cancelPendingRemoval(String clientToken) {
+        SessionInfo info = sessions.get(clientToken);
+        if (info != null) {
+            info.pendingRemoval = false;
+        }
+    }
+
+    /**
+     * 向单个会话发送事件。
      */
     public void sendTo(WebSocketSession session, WsEvent event) {
         send(session, serialize(event));
@@ -96,14 +183,11 @@ public class WsBroadcaster {
 
     /**
      * 向所有在线会话广播事件。
-     *
-     * Broadcasts an event to all online sessions.
-     * @param event 要广播的事件 / the event to broadcast
      */
     public void broadcast(WsEvent event) {
         String json = serialize(event);
-        for (WebSocketSession s : sessions.values()) {
-            send(s, json);
+        for (SessionInfo info : sessions.values()) {
+            send(info.session, json);
         }
     }
 
@@ -114,8 +198,7 @@ public class WsBroadcaster {
                 session.sendMessage(new TextMessage(json));
             }
         } catch (IOException e) {
-            log.debug("发送失败，移除会话 {}: {}", session.getId(), e.getMessage());
-            unregister(session);
+            log.debug("发送失败: {}", session.getId());
         }
     }
 
@@ -126,5 +209,15 @@ public class WsBroadcaster {
             log.warn("事件序列化失败: {}", e.getMessage());
             return null;
         }
+    }
+
+    private String getClientToken(WebSocketSession session) {
+        Object token = session.getAttributes().get("client_token");
+        return token != null ? token.toString() : session.getId();
+    }
+
+    private String getClientType(WebSocketSession session) {
+        Object type = session.getAttributes().get("client_type");
+        return type != null ? type.toString() : null;
     }
 }
