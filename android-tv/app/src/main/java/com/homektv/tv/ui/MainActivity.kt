@@ -123,6 +123,10 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     private var hasCurrentSong = false
     private var isFinishing = false
     private var connectionFailed = false
+    private var lastStandbyClickTime = 0L
+    private var consecutiveStandbyClicks = 0
+    private val standbyClickWindowMs = 300L
+    private val standbyClickThreshold = 5
     private val standbyTicker = object : Runnable {
         override fun run() {
             if (standbyCarouselEnabled && recommendations.isNotEmpty()) {
@@ -162,6 +166,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        binding.statusIndicator.setBackgroundResource(R.drawable.status_indicator_yellow)
 
         if (!audioPreview) {
             // 兜底：如果 serverHost 为空但有历史记录，用第一个
@@ -292,19 +297,12 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 binding.txtBrandName?.let {
                     (it as? TextView)?.textSize = 26f * scale
                 }
-                // 切换按钮
-                binding.btnExitServer?.let {
-                    (it as? Button)?.textSize = 14f * scale
-                }
                 // 顶部信息栏
                 binding.txtPhones?.let {
                     (it as? TextView)?.textSize = 18f * scale
                 }
                 binding.txtClock?.let {
                     (it as? TextView)?.textSize = 24f * scale
-                }
-                binding.txtStatus?.let {
-                    (it as? TextView)?.textSize = 18f * scale
                 }
                 // 排队中文字
                 binding.txtQueueCount?.let {
@@ -482,15 +480,13 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                     }
                     // 待机页：上键聚焦切换按钮
                     KeyEvent.KEYCODE_DPAD_UP -> {
-                        if (binding.standbyPanel.visibility == View.VISIBLE) {
-                            binding.btnExitServer.requestFocus()
-                        }
+                        // 不再将焦点导航到切换按钮
                         return true
                     }
-                    // 待机页切换按钮上按确认键：断开连接并跳转
+                    // 待机页连续按确认键5次：弹出退出确认
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        if (binding.standbyPanel.visibility == View.VISIBLE && binding.btnExitServer.hasFocus()) {
-                            exitServer()
+                        if (binding.standbyPanel.visibility == View.VISIBLE) {
+                            checkStandbyExitClick(System.currentTimeMillis())
                             return true
                         }
                         showVocalPanel()
@@ -530,17 +526,10 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         binding.vocalPanel.visibility = View.VISIBLE
         (if (currentVocalMode == "original") binding.btnVocalOriginal else binding.btnVocalAccompaniment).requestFocus()
         resetVocalTimer()
-        // 弹窗显示时，监听切换按钮焦点，防止意外获得焦点
-        binding.btnExitServer.onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
-            if (hasFocus && binding.vocalPanel.visibility == View.VISIBLE) {
-                (if (currentVocalMode == "original") binding.btnVocalOriginal else binding.btnVocalAccompaniment).requestFocus()
-            }
-        }
     }
 
     private fun hideVocalPanel() {
         binding.vocalPanel.visibility = View.GONE
-        binding.btnExitServer.onFocusChangeListener = null
         // 弹窗关闭后，焦点归还主视图
         if (binding.standbyPanel.visibility == View.VISIBLE) {
             binding.standbyContent.requestFocus()
@@ -571,7 +560,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         binding.remoteMute.setOnClickListener { sendControl("mute", "{\"muted\":${!currentMuted}}") }
         binding.remoteQueue.setOnClickListener { showQueueOverlay() }
         binding.remoteMicrophone.setOnClickListener { toggleMicrophoneMonitor() }
-        binding.btnExitServer.setOnClickListener { exitServer() }
+        binding.logoArea.setOnClickListener { onLogoAreaClicked() }
         updateMicrophoneButton()
         binding.queueClose.setOnClickListener { binding.queueOverlay.visibility = View.GONE }
         binding.btnVocalOriginal.setOnClickListener {
@@ -687,21 +676,36 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             // 连接成功，取消超时定时器
             binding.root.removeCallbacks(connectionTimeoutRunnable)
             binding.validatingOverlay.tag = null  // 重置防抖标记
-            binding.txtStatus.setText(R.string.status_connected)
+            binding.statusIndicator.setBackgroundResource(R.drawable.status_indicator_green)
             // 蒙版在连接成功后消失，让用户看到待机页内容
             binding.validatingOverlay.visibility = View.GONE
             checkForTvUpdate()
         } else {
-            binding.txtStatus.setText(R.string.status_connecting)
+            binding.statusIndicator.setBackgroundResource(R.drawable.status_indicator_yellow)
         }
-        // 退出按钮在待机页始终可见
-        if (binding.standbyPanel.visibility == View.VISIBLE) {
-            binding.btnExitServer.visibility = View.VISIBLE
+    }
+
+    private fun onLogoAreaClicked() {
+        if (binding.standbyPanel.visibility != View.VISIBLE) return
+        checkStandbyExitClick(System.currentTimeMillis())
+    }
+
+    private fun checkStandbyExitClick(now: Long) {
+        if (now - lastStandbyClickTime > standbyClickWindowMs) {
+            consecutiveStandbyClicks = 1
+        } else {
+            consecutiveStandbyClicks++
+        }
+        lastStandbyClickTime = now
+        if (consecutiveStandbyClicks >= standbyClickThreshold) {
+            consecutiveStandbyClicks = 0
+            exitServer()
         }
     }
 
     private fun exitServer() {
         AlertDialog.Builder(this)
+            .setCancelable(false)
             .setTitle("退出服务器")
             .setMessage("确定退出当前服务器吗？")
             .setNegativeButton("取消", null)
@@ -719,6 +723,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         // 防抖：如果正在显示失败蒙版，不再重复触发
         if (binding.validatingOverlay.tag == "failed") return
         binding.validatingOverlay.tag = "failed"
+        binding.statusIndicator.setBackgroundResource(R.drawable.status_indicator_red)
 
         runOnUiThread {
             if (isFinishing) return@runOnUiThread

@@ -32,7 +32,7 @@
     <string name="standby_scan_sub">微信 / 相机 扫一扫，或浏览器访问下方地址</string>
     <string name="status_connecting">服务连接中…</string>
     <string name="status_connected">服务端在线</string>
-    <string name="status_phones">已有 %1$d 位伙伴加入</string>
+    <string name="status_phones">房间 %1$d 人</string>
 
     <!-- 播放 -->
     <string name="play_error">当前歌曲无法播放，已跳过</string>
