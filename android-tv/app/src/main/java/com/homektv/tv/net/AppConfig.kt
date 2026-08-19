@@ -12,7 +12,8 @@ import kotlinx.serialization.json.Json
  */
 class AppConfig(context: Context) {
 
-    private val prefs = context.applicationContext
+    private val appContext: Context = context.applicationContext
+    private val prefs = appContext
         .getSharedPreferences("ktv_tv", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -85,10 +86,10 @@ class AppConfig(context: Context) {
         get() = prefs.getBoolean(KEY_MICROPHONE_MONITOR, true)
         set(value) = prefs.edit { putBoolean(KEY_MICROPHONE_MONITOR, value) }
 
-    /** WebSocket 地址：ws(s)://host:port/ws?client_type=tv&client_token=xxx */
-    fun wsUrl(clientToken: String): String {
+    /** WebSocket 地址：ws(s)://host:port/ws?client_type=tv&client_token=xxx&device_id=yyy */
+    fun wsUrl(clientToken: String, deviceId: String): String {
         val protocol = if (isHttps) "wss" else "ws"
-        return "$protocol://${hostPort()}/ws?client_type=tv&client_token=$clientToken"
+        return "$protocol://${hostPort()}/ws?client_type=tv&client_token=$clientToken&device_id=$deviceId"
     }
 
     /** REST/资源基址：htp(s)://host:port/api */
@@ -110,6 +111,42 @@ class AppConfig(context: Context) {
             prefs.edit { putString(KEY_TOKEN, t) }
             t
         }
+
+    /** 设备唯一标识（基于 Android ID + 安装时间，用于房间识别）。 */
+    val deviceId: String
+        get() {
+            // 先取已存的 deviceId
+            val stored = prefs.getString(KEY_DEVICE_ID, null)
+            if (stored != null && !isKnownBadDeviceId(stored)) {
+                return stored
+            }
+            // 旧值已知坑（"tv-android_id" 等）→ 重新生成；第一次启动也走这里
+            val raw = android.provider.Settings.Secure.getString(
+                appContext.contentResolver,
+                android.provider.Settings.Secure.ANDROID_ID,
+            ).orEmpty()
+            // Android ID 在模拟器 / Android TV / 部分 ROM 上经常返回字面 "android_id" 或太短，
+            // 必须过滤掉，否则全设备会共用同一个 id 导致 rooms_device_id_key 冲突
+            val isValidHex = raw.length in 8..32 && raw.matches(Regex("^[0-9a-fA-F]+$"))
+            val androidId = if (isValidHex) raw else java.util.UUID.randomUUID().toString().take(8)
+            val id = "tv-$androidId"
+            android.util.Log.i("AppConfig", "Generated deviceId=$id (raw='$raw', validHex=$isValidHex, previousStored='$stored')")
+            prefs.edit { putString(KEY_DEVICE_ID, id) }
+            return id
+        }
+
+    /** 过滤历史上被坑出来的 deviceId，避免反复撞 unique。 */
+    private fun isKnownBadDeviceId(id: String): Boolean {
+        // "tv-android_id" 字面字符串（Settings.Secure.ANDROID_ID 在某些 ROM 上就是这个字面值）
+        // 或 tv- 后跟非 hex 短字符串
+        if (id == "tv-android_id") return true
+        if (id.startsWith("tv-") && id.length <= 11) {
+            val suffix = id.removePrefix("tv-")
+            val looksHex = suffix.length >= 8 && suffix.matches(Regex("^[0-9a-fA-F]+$"))
+            if (!looksHex) return true
+        }
+        return false
+    }
 
     private fun migrateLegacyServer() {
         if (prefs.contains(KEY_SAVED_SERVERS)) return
@@ -135,6 +172,7 @@ class AppConfig(context: Context) {
     companion object {
         private const val KEY_HOST = "server_host"
         private const val KEY_TOKEN = "client_token"
+        private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_MICROPHONE_MONITOR = "microphone_monitor_enabled"
         private const val KEY_SAVED_SERVERS = "saved_servers"
         private const val MAX_SAVED_SERVERS = 10

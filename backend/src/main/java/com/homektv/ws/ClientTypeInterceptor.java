@@ -8,20 +8,20 @@ import org.springframework.web.socket.server.HandshakeInterceptor;
 import java.util.Map;
 
 /**
- * WS 握手拦截器（P2.13）：从查询参数 client_type=tv|h5、client_token 存入会话属性，
+ * WS 握手拦截器（P2.13）：从查询参数 client_type=tv|h5、client_token、device_id 存入会话属性，
  * 供 TV 在线检测与用户标识使用。
  *
  * WebSocket handshake interceptor (P2.13): extracts query parameters
- * {@code client_type=tv|h5} and {@code client_token} into session attributes
+ * {@code client_type=tv|h5}, {@code client_token} and {@code device_id} into session attributes
  * for TV online detection and user identification.
  */
 public class ClientTypeInterceptor implements HandshakeInterceptor {
 
     /**
-     * 在 WebSocket 握手前解析查询参数，将 client_type 和 client_token 存入会话属性。
+     * 在 WebSocket 握手前解析查询参数，将 client_type、client_token 和 device_id 存入会话属性。
      *
      * Parses query parameters before the WebSocket handshake and stores
-     * {@code client_type} and {@code client_token} in session attributes.
+     * {@code client_type}, {@code client_token} and {@code device_id} in session attributes.
      *
      * @param request  HTTP 握手请求
      * @param response HTTP 握手响应
@@ -39,7 +39,7 @@ public class ClientTypeInterceptor implements HandshakeInterceptor {
                 if (eq > 0) {
                     String k = pair.substring(0, eq);
                     String v = pair.substring(eq + 1);
-                    if ("client_type".equals(k) || "client_token".equals(k)) {
+                    if ("client_type".equals(k) || "client_token".equals(k) || "device_id".equals(k)) {
                         attributes.put(k, v);
                     }
                 }

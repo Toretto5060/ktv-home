@@ -42,6 +42,17 @@ class KtvSocket(
         fun onConnectionChanged(connected: Boolean) {}
         /** 首次连接失败回调（不触发重连，用于跳转到连接页）。 */
         fun onConnectionFailed() {}
+        /** 设备注册结果。 */
+        fun onDeviceApproved(roomName: String, qrCode: String?, activeStart: String?, activeEnd: String?) {}
+        fun onDevicePending(expiredAt: String?) {}
+        fun onDeviceBlacklisted() {}
+        fun onRoomNotOpen() {}
+        fun onRoomDisabled() {}
+        fun onRoomNameChanged(name: String) {}
+        fun onRoomTimeChanged(activeStart: String?, activeEnd: String?, qrCode: String?) {}
+        fun onQrCodeRefreshed(qrCode: String) {}
+        fun onMemberJoined(deviceId: String, nickname: String, memberCount: Long) {}
+        fun onApplicationExpired() {}
     }
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -97,7 +108,7 @@ class KtvSocket(
 
     private fun openSocket() {
         if (closed) return
-        val url = config.wsUrl(config.clientToken)
+        val url = config.wsUrl(config.clientToken, config.deviceId)
         Log.d(TAG, "connecting $url")
         val req = Request.Builder().url(url).build()
         ws = http.newWebSocket(req, socketListener)
@@ -172,6 +183,46 @@ class KtvSocket(
                 val txt = (payload as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNullSafe().orEmpty()
                 listener.onToast(txt)
             }
+            // 设备注册相关事件
+            "device_approved" -> {
+                val obj = payload as? JsonObject
+                val roomName = obj?.get("name")?.jsonPrimitive?.contentOrNullSafe() ?: ""
+                val qrCode = obj?.get("qr_code")?.jsonPrimitive?.contentOrNullSafe()
+                val activeStart = obj?.get("active_start")?.jsonPrimitive?.contentOrNullSafe()
+                val activeEnd = obj?.get("active_end")?.jsonPrimitive?.contentOrNullSafe()
+                listener.onDeviceApproved(roomName, qrCode, activeStart, activeEnd)
+            }
+            "device_pending" -> {
+                val obj = payload as? JsonObject
+                val expiredAt = obj?.get("expired_at")?.jsonPrimitive?.contentOrNullSafe()
+                listener.onDevicePending(expiredAt)
+            }
+            "device_blacklisted" -> listener.onDeviceBlacklisted()
+            "room_not_open" -> listener.onRoomNotOpen()
+            "room_disabled" -> listener.onRoomDisabled()
+            "room_name_changed" -> {
+                val name = (payload as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNullSafe() ?: ""
+                listener.onRoomNameChanged(name)
+            }
+            "room_time_changed" -> {
+                val obj = payload as? JsonObject
+                val activeStart = obj?.get("active_start")?.jsonPrimitive?.contentOrNullSafe()
+                val activeEnd = obj?.get("active_end")?.jsonPrimitive?.contentOrNullSafe()
+                val qrCode = obj?.get("qr_code")?.jsonPrimitive?.contentOrNullSafe()
+                listener.onRoomTimeChanged(activeStart, activeEnd, qrCode)
+            }
+            "qr_code_refreshed" -> {
+                val qrCode = (payload as? JsonObject)?.get("qr_code")?.jsonPrimitive?.contentOrNullSafe() ?: ""
+                listener.onQrCodeRefreshed(qrCode)
+            }
+            "member_joined" -> {
+                val obj = payload as? JsonObject
+                val deviceId = obj?.get("device_id")?.jsonPrimitive?.contentOrNullSafe() ?: ""
+                val nickname = obj?.get("nickname")?.jsonPrimitive?.contentOrNullSafe() ?: ""
+                val memberCount = obj?.get("member_count")?.jsonPrimitive?.long ?: 0L
+                listener.onMemberJoined(deviceId, nickname, memberCount)
+            }
+            "application_expired" -> listener.onApplicationExpired()
             // 以下事件 payload 均为完整快照
             "sync_full", "queue_updated", "now_playing", "player_state", "playback_restarted",
             "volume_changed", "vocal_changed" -> {

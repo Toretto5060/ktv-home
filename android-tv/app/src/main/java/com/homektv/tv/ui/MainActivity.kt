@@ -25,6 +25,7 @@ import android.view.Gravity
 import android.view.ViewGroup
 import androidx.annotation.OptIn
 import java.text.SimpleDateFormat
+import java.time.OffsetDateTime
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -79,6 +80,25 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     private var checkedReleaseVersion: String? = null
     private var promptedReleaseVersion: String? = null
     private var pendingUpdateApk: File? = null
+    /** 授权重试定时器：network_error 时 30s 后再试一次。 */
+    private val authorizeRetryRunnable = Runnable { runAuthorizeCheck() }
+    /** 是否正在等待授权结果（防止重试与已成功的请求叠加）。 */
+    private var authorizeCheckInFlight = false
+    /** 标识当前授权请求是否已在 HTTP 层面发起（WS 连上后置 true，授权结果返回后清 false）。 */
+    private var authorizationInFlight = false
+    /** 授权是否已完成（approved/pending/blacklisted/room_not_open 任一非 network_error 状态视为完成）。 */
+    private var authorizeCompleted = false
+    /** 待机页数据是否已加载（授权通过后只加载一次，避免重复请求）。 */
+    private var standbyLoaded = false
+    /** pending 审批截止时间戳（毫秒），null 表示无倒计时。 */
+    private var pendingExpiredAtMs: Long? = null
+    /** pending 倒计时刷新定时器。 */
+    private val pendingCountdownTick = object : Runnable {
+        override fun run() {
+            updatePendingCountdown()
+            binding.root.postDelayed(this, 1_000L)
+        }
+    }
     private val microphonePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
@@ -151,7 +171,15 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     }
     private val standbySettingsTicker = object : Runnable {
         override fun run() {
-            lifecycleScope.launch { applyStandbyContent(mediaApi.fetchStandbyContent()) }
+            // 仅授权通过后才轮询（pending/blacklisted/room_not_open 不暴露房间信息）
+            if (!authorizeCompleted) {
+                binding.standbyPanel.postDelayed(this, 60_000L)
+                return
+            }
+            lifecycleScope.launch {
+                val content = mediaApi.fetchStandbyContent()
+                if (authorizeCompleted) applyStandbyContent(content)
+            }
             binding.standbyPanel.postDelayed(this, 60_000L)
         }
     }
@@ -185,6 +213,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 return
             }
             binding.validatingOverlay.visibility = View.VISIBLE
+            binding.txtOverlayTitle.text = "正在连接..."
             binding.txtValidatingHost.text = getString(R.string.setup_verifying_server)
         }
 
@@ -195,12 +224,14 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         clock.post(clockTick)
 
         mediaApi = MediaApi(config)
-        loadQr()
-        loadStandbyContent()
-        startStandbyMotion()
-        binding.standbyPanel.post(standbyTicker)
-        binding.standbyPanel.postDelayed(burnInTicker, 60_000L)
-        binding.standbyPanel.post(standbySettingsTicker)
+        if (audioPreview) {
+            // 音频预览模式无需授权，启动完整的待机页数据加载
+            loadStandbyDataIfApproved()
+        } else {
+            // 在线模式：待机页数据延迟到 runAuthorizeCheck() 通过后加载，
+            // 避免 pending/blacklisted 状态暴露房间信息（QR / standbyContent / 歌曲数）。
+            binding.standbyPanel.postDelayed(burnInTicker, 60_000L)
+        }
         engine = PlaybackEngine(
             context = this,
             onProgress = { pos ->
@@ -374,6 +405,8 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         socket?.close()
         clock.removeCallbacks(clockTick)
         clock.removeCallbacks(progressHide)
+        binding.root.removeCallbacks(authorizeRetryRunnable)
+        binding.root.removeCallbacks(pendingCountdownTick)
         binding.standbyPanel.removeCallbacks(standbyTicker)
         binding.standbyPanel.removeCallbacks(burnInTicker)
         binding.standbyPanel.removeCallbacks(standbySettingsTicker)
@@ -673,15 +706,275 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     override fun onConnectionChanged(connected: Boolean) {
         if (connected) {
             connectionFailed = false
+            // 重置幂等标志，确保下次状态变更能正确触发 UI
+            blacklistNotified = false
             // 连接成功，取消超时定时器
             binding.root.removeCallbacks(connectionTimeoutRunnable)
-            binding.validatingOverlay.tag = null  // 重置防抖标记
             binding.statusIndicator.setBackgroundResource(R.drawable.status_indicator_green)
-            // 蒙版在连接成功后消失，让用户看到待机页内容
-            binding.validatingOverlay.visibility = View.GONE
+            // WS 重连时强制重新校验授权（管理员可能改了状态）
+            if (authorizeCompleted) hideRoomStatusOverlay()
+            // 授权请求发出后，如果结果还没回来（HTTP 异步），保持蒙版可见，
+            // 等 pending/blacklisted/approved 结果到达后再决定显隐
+            runAuthorizeCheck(force = true)
             checkForTvUpdate()
         } else {
             binding.statusIndicator.setBackgroundResource(R.drawable.status_indicator_yellow)
+        }
+    }
+
+    /**
+     * 调用 GET /api/tv/authorize 校验当前设备授权状态。
+     *
+     * <ul>
+     *   <li>approved → 关闭任何授权蒙版，正常显示待机页</li>
+     *   <li>pending / blacklisted / room_not_open → 弹授权状态蒙版</li>
+     *   <li>network_error → 30s 后自动重试（最多持续直到成功或返回非 network_error）</li>
+     * </ul>
+     */
+    private fun runAuthorizeCheck(force: Boolean = false) {
+        if (authorizeCheckInFlight) return
+        if (authorizeCompleted && !force) return
+        val deviceId = config.deviceId
+        authorizeCheckInFlight = true
+        authorizationInFlight = true
+        lifecycleScope.launch {
+            val result = mediaApi.authorize(deviceId)
+            authorizeCheckInFlight = false
+            authorizationInFlight = false
+            if (isFinishing) return@launch
+            when (result.status) {
+                "approved" -> {
+                    authorizeCompleted = true
+                    binding.root.removeCallbacks(authorizeRetryRunnable)
+                    // 已批准，确保授权蒙版隐藏，让用户正常使用
+                    hideRoomStatusOverlay()
+                    applyRoomName(result.roomName)
+                    loadStandbyDataIfApproved()
+                }
+                "pending" -> {
+                    authorizeCompleted = true
+                    binding.root.removeCallbacks(authorizeRetryRunnable)
+                    showRoomStatusOverlay(
+                        R.string.room_status_pending,
+                        R.string.room_status_pending_hint,
+                        true,
+                        parseIsoToMs(result.expiredAt),
+                    )
+                }
+                "blacklisted" -> {
+                    authorizeCompleted = true
+                    binding.root.removeCallbacks(authorizeRetryRunnable)
+                    // 直接显示黑名单文本，3秒后返回 SetupActivity
+                    binding.validatingOverlay.tag = "blacklisted"
+                    binding.validatingOverlay.visibility = View.VISIBLE
+                    binding.txtOverlayTitle.text = getString(R.string.room_status_blacklisted)
+                    binding.txtValidatingHost.text = ""
+                    socket?.close()
+                    socket = null
+                    binding.root.postDelayed({
+                        if (!isFinishing) {
+                            startActivity(android.content.Intent(this@MainActivity, SetupActivity::class.java))
+                            finish()
+                        }
+                    }, 3000L)
+                }
+                "room_not_open" -> {
+                    authorizeCompleted = true
+                    binding.root.removeCallbacks(authorizeRetryRunnable)
+                    showRoomStatusOverlay(R.string.room_status_not_open, 0, false)
+                }
+                else -> {
+                    // network_error：30s 后重试，期间继续走 standby
+                    binding.root.removeCallbacks(authorizeRetryRunnable)
+                    binding.root.postDelayed(authorizeRetryRunnable, 30_000L)
+                }
+            }
+        }
+    }
+
+    /** 关闭授权状态蒙版并恢复正常待机页。 */
+    private fun hideRoomStatusOverlay() {
+        if (!::binding.isInitialized) return
+        if (binding.validatingOverlay.visibility != View.VISIBLE) return
+        binding.root.removeCallbacks(pendingCountdownTick)
+        pendingExpiredAtMs = null
+        binding.validatingOverlay.tag = null
+        binding.validatingOverlay.visibility = View.GONE
+        binding.txtOverlayTitle.text = "正在连接..."
+    }
+
+    override fun onDeviceApproved(roomName: String, qrCode: String?, activeStart: String?, activeEnd: String?) {
+        // 名称为空时用默认标题，避免显示 tv-xxx
+        val displayName = roomName?.takeIf { it.isNotBlank() } ?: getString(R.string.app_name)
+        currentRoomName = displayName
+        currentQrCode = qrCode
+        runOnUiThread {
+            onToast("房间 $displayName 已批准，连接成功")
+            authorizeCompleted = true
+            binding.root.removeCallbacks(authorizeRetryRunnable)
+            binding.root.removeCallbacks(pendingCountdownTick)
+            pendingExpiredAtMs = null
+            binding.validatingOverlay.visibility = View.GONE
+            binding.txtOverlayTitle.text = "正在连接..."
+            binding.txtBrandName.text = displayName
+            showStandby()
+            if (!standbyLoaded) loadStandbyDataIfApproved()
+        }
+    }
+
+    override fun onDevicePending(expiredAt: String?) {
+        runOnUiThread {
+            authorizeCompleted = true
+            binding.root.removeCallbacks(authorizeRetryRunnable)
+            showRoomStatusOverlay(
+                R.string.room_status_pending,
+                R.string.room_status_pending_hint,
+                true,
+                parseIsoToMs(expiredAt),
+            )
+        }
+    }
+
+    private var blacklistNotified = false
+
+    override fun onDeviceBlacklisted() {
+        runOnUiThread {
+            if (blacklistNotified) return@runOnUiThread
+            blacklistNotified = true
+            binding.root.removeCallbacks(pendingCountdownTick)
+            pendingExpiredAtMs = null
+            binding.validatingOverlay.visibility = View.VISIBLE
+            binding.txtOverlayTitle.text = getString(R.string.room_status_blacklisted)
+            binding.txtValidatingHost.text = ""
+            // 3秒后返回连接页面
+            binding.root.postDelayed({
+                if (!isFinishing) {
+                    startActivity(android.content.Intent(this, SetupActivity::class.java))
+                    finish()
+                }
+            }, 3000L)
+        }
+    }
+
+    override fun onRoomNotOpen() {
+        runOnUiThread {
+            showRoomStatusOverlay(R.string.room_status_not_open, 0, false)
+        }
+    }
+
+    override fun onRoomDisabled() {
+        runOnUiThread {
+            if (blacklistNotified) return@runOnUiThread
+            binding.root.removeCallbacks(pendingCountdownTick)
+            pendingExpiredAtMs = null
+            binding.validatingOverlay.visibility = View.VISIBLE
+            binding.txtOverlayTitle.text = getString(R.string.room_status_pending)
+            binding.txtValidatingHost.text = getString(R.string.room_status_pending_hint)
+        }
+    }
+
+    override fun onRoomNameChanged(name: String) {
+        applyRoomName(name)
+        runOnUiThread { onToast("房间名称已更新为: $currentRoomName") }
+    }
+
+    /**
+     * 统一的名字更新逻辑：空名显示默认标题，同步更新 currentRoomName 和左上角 txtBrandName。
+     */
+    private fun applyRoomName(name: String?) {
+        val displayName = name?.takeIf { it.isNotBlank() } ?: getString(R.string.app_name)
+        currentRoomName = displayName
+        binding.txtBrandName.text = displayName
+    }
+
+    override fun onRoomTimeChanged(activeStart: String?, activeEnd: String?, qrCode: String?) {
+        currentQrCode = qrCode
+        runOnUiThread {
+            onToast("房间开放时间已更新")
+            // 重新加载二维码
+            loadQr()
+        }
+    }
+
+    override fun onQrCodeRefreshed(qrCode: String) {
+        currentQrCode = qrCode
+        runOnUiThread {
+            onToast("二维码已刷新")
+            loadQr()
+        }
+    }
+
+    override fun onMemberJoined(deviceId: String, nickname: String, memberCount: Long) {
+        runOnUiThread {
+            binding.txtPhones?.text = if (memberCount > 0) "房间 ${memberCount} 人" else "房间 0 人"
+            onToast("$nickname 加入了房间")
+        }
+    }
+
+    override fun onApplicationExpired() {
+        runOnUiThread {
+            showRoomStatusOverlay(R.string.room_status_expired, 0, false)
+            socket?.close()
+            socket = null
+        }
+    }
+
+    /** 当前房间信息 */
+    private var currentRoomName: String? = ""
+    private var currentQrCode: String? = null
+
+    /** 显示房间状态蒙版（等待审批/黑名单/房间关闭等）。 */
+    private fun showRoomStatusOverlay(titleRes: Int, hintRes: Int, allowReconnect: Boolean, expiredAtMs: Long? = null) {
+        binding.validatingOverlay.visibility = View.VISIBLE
+        binding.validatingOverlay.tag = "room_status"
+        binding.txtOverlayTitle.text = getString(titleRes)
+        binding.txtValidatingHost.text = if (hintRes != 0) getString(hintRes) else ""
+
+        pendingExpiredAtMs = expiredAtMs
+        binding.root.removeCallbacks(pendingCountdownTick)
+        if (expiredAtMs != null) {
+            updatePendingCountdown()
+            binding.root.post(pendingCountdownTick)
+        }
+    }
+
+    /** 刷新 pending 倒计时：合并到标题中居中显示。 */
+    private fun updatePendingCountdown() {
+        val expiredAtMs = pendingExpiredAtMs ?: return
+        val remainingMs = (expiredAtMs - System.currentTimeMillis()).coerceAtLeast(0)
+        if (remainingMs <= 0) {
+            binding.txtOverlayTitle.text = getString(R.string.room_status_pending)
+            binding.root.removeCallbacks(pendingCountdownTick)
+            return
+        }
+        val totalSec = remainingMs / 1000
+        val mm = (totalSec / 60).toInt()
+        val ss = (totalSec % 60).toInt()
+        val countdown = String.format(Locale.getDefault(), "%02d:%02d", mm, ss)
+        binding.txtOverlayTitle.text = "${getString(R.string.room_status_pending)} ($countdown)"
+        binding.root.postDelayed(pendingCountdownTick, 1000L)
+    }
+
+    /**
+     * 解析后端 ISO 字符串 → 毫秒时间戳。
+     * 支持格式：
+     *   - 新格式（推荐）：2026-08-19T10:52:00Z（含 Z 后缀，UTC）
+     *   - ISO offset 格式：2026-08-19T19:15:00+08:00（Java SimpleDateFormat 不识别冒号，需替换）
+     *   - 旧格式（兼容）：2026-08-19T10:52:00（无时区，按本地时区解析，有偏差但能显示）
+     * 解析失败返回 null，倒计时不显示。
+     */
+    private fun parseIsoToMs(iso: String?): Long? {
+        if (iso.isNullOrBlank()) return null
+        return try {
+            // 统一去掉末尾的 Z 后缀，再用 OffsetDateTime 解析（自动识别 +08:00 / +0000）
+            val withoutZ = iso.trimEnd('Z')
+            OffsetDateTime.parse(withoutZ)?.toInstant()?.toEpochMilli()
+        } catch (_: Exception) {
+            // 旧格式（无时区）：按本地时区解析
+            try {
+                val pattern = if (iso.contains(".")) "yyyy-MM-dd'T'HH:mm:ss.SSS" else "yyyy-MM-dd'T'HH:mm:ss"
+                SimpleDateFormat(pattern, Locale.US).parse(iso)?.time
+            } catch (_: Exception) { null }
         }
     }
 
@@ -727,8 +1020,13 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
 
         runOnUiThread {
             if (isFinishing) return@runOnUiThread
+            // 如果授权 HTTP 请求已在路上，等它返回（可能会覆盖成黑名单等正确状态），
+            // 不在这里提前显示"连接失败"误导用户
+            if (authorizationInFlight) return@runOnUiThread
+
             connectionFailed = true
             binding.validatingOverlay.visibility = View.VISIBLE
+            binding.txtOverlayTitle.text = "连接服务器失败"
             // 显示 1.5s 后跳转
             binding.validatingOverlay.postDelayed({
                 if (!isFinishing && connectionFailed) {
@@ -1017,6 +1315,20 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     }
 
     // ---- 待机页二维码（P1.30） ----
+
+    /**
+     * 仅在授权通过后加载待机页数据（QR / standbyContent / 曲库数 / 推荐歌单）。
+     * pending/blacklisted/room_not_open 期间不会触发任何房间信息接口。
+     */
+    private fun loadStandbyDataIfApproved() {
+        if (!authorizeCompleted || standbyLoaded) return
+        standbyLoaded = true
+        loadQr()
+        loadStandbyContent()
+        startStandbyMotion()
+        binding.standbyPanel.post(standbyTicker)
+        binding.standbyPanel.post(standbySettingsTicker)
+    }
 
     /** 异步拉 /api/qr 加载进待机页占位框；失败保留占位文字（用户仍可读明文地址）。 */
     private fun loadQr() {

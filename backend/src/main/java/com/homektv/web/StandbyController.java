@@ -64,8 +64,14 @@ public class StandbyController {
     public ResponseEntity<Resource> logo() {
         Object value = settingService.getAll().get("standby_logo_path");
         if (value == null) return ResponseEntity.notFound().build();
-        Path file = dataRoot.resolve(value.toString()).normalize();
-        if (!file.startsWith(dataRoot.normalize()) || !Files.isReadable(file)) return ResponseEntity.notFound().build();
+        String rel = value.toString();
+        if (rel.isBlank()) return ResponseEntity.notFound().build();
+        Path file = dataRoot.resolve(rel).normalize();
+        // 必须仍是 dataRoot 下的常规文件（否则空字符串 → dataRoot 目录，或配置错误指向目录，
+        // 会触发 ResourceHttpMessageConverter.writeContent 报 "Is a directory"）。
+        if (!file.startsWith(dataRoot.normalize()) || !Files.isRegularFile(file) || !Files.isReadable(file)) {
+            return ResponseEntity.notFound().build();
+        }
         String name = file.getFileName().toString().toLowerCase();
         MediaType type = name.endsWith(".png") ? MediaType.IMAGE_PNG : name.endsWith(".webp") ? MediaType.parseMediaType("image/webp") : MediaType.IMAGE_JPEG;
         return ResponseEntity.ok().contentType(type).body(new FileSystemResource(file));

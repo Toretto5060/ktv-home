@@ -216,9 +216,12 @@ class MediaApi(private val config: AppConfig) {
 
     /** 拉取二维码 PNG 字节；失败返回 null。 */
     suspend fun fetchQr(size: Int): ByteArray? = withContext(Dispatchers.IO) {
-        val url = qrUrl(size)
+        // 加时间戳参数绕过 OkHttp 缓存/CDN 缓存，确保刷新时拿到最新图片
+        val url = "${qrUrl(size)}&_t=${System.currentTimeMillis()}"
         try {
-            http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+            http.newCall(Request.Builder().url(url)
+                .header("Cache-Control", "no-cache")
+                .build()).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     Log.w(TAG, "qr http ${resp.code} url=$url")
                     return@withContext null
@@ -228,6 +231,62 @@ class MediaApi(private val config: AppConfig) {
         } catch (e: Exception) {
             Log.w(TAG, "qr fetch failed: ${e.message} url=$url")
             null
+        }
+    }
+
+    /**
+     * 查询 TV 设备授权状态（P1.16 TV 侧进入待机页后的校验）。
+     *
+     * <p>返回结构：
+     * <ul>
+     *   <li>status = "approved" → roomId/roomName 不为 null</li>
+     *   <li>status = "pending" → applicationId/expiredAt 不为 null</li>
+     *   <li>status = "blacklisted" / "room_not_open" → 其余字段为 null</li>
+     * </ul>
+     *
+     * <p>网络异常 / 接口返回非 2xx 时返回 {@link TvAuthorizeResult#networkError}（status="network_error"），
+     * 由调用方决定是否 30s 后重试。
+     */
+    suspend fun authorize(deviceId: String): TvAuthorizeResult = withContext(Dispatchers.IO) {
+        val url = "${config.apiBase()}/tv/authorize?device_id=${java.net.URLEncoder.encode(deviceId, "UTF-8")}"
+        try {
+            http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "authorize http ${resp.code}")
+                    return@withContext when (resp.code) {
+                        403 -> TvAuthorizeResult(status = "blacklisted")
+                        404 -> TvAuthorizeResult(status = "network_error")
+                        else -> TvAuthorizeResult.networkError()
+                    }
+                }
+                val body = resp.body?.string() ?: return@withContext TvAuthorizeResult.networkError()
+                val obj = json.parseToJsonElement(body).let { it as? kotlinx.serialization.json.JsonObject }
+                    ?: return@withContext TvAuthorizeResult.networkError()
+                val status = obj["status"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                    ?: return@withContext TvAuthorizeResult.networkError()
+                when (status) {
+                    "approved" -> TvAuthorizeResult(
+                        status = "approved",
+                        roomId = (obj["room_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
+                        roomName = (obj["name"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
+                        applicationId = null,
+                        expiredAt = null,
+                    )
+                    "pending" -> TvAuthorizeResult(
+                        status = "pending",
+                        roomId = null,
+                        roomName = null,
+                        applicationId = (obj["application_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
+                        expiredAt = (obj["expired_at"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
+                    )
+                    "blacklisted" -> TvAuthorizeResult(status = "blacklisted", roomId = null, roomName = null, applicationId = null, expiredAt = null)
+                    "room_not_open" -> TvAuthorizeResult(status = "room_not_open", roomId = null, roomName = null, applicationId = null, expiredAt = null)
+                    else -> TvAuthorizeResult.networkError()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "authorize failed: ${e.message}")
+            TvAuthorizeResult.networkError()
         }
     }
 

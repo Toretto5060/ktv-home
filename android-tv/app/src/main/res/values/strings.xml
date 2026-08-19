@@ -41,4 +41,12 @@
     <string name="qr_loading">二维码加载中…</string>
     <string name="qr_desc">扫码点歌二维码</string>
     <string name="qr_wechat_order">微信扫码点歌</string>
+
+    <!-- 房间管理 -->
+    <string name="room_status_pending">等待管理员审批…</string>
+    <string name="room_status_pending_hint">您的设备正在等待管理员审批，审批通过后将自动连接</string>
+    <string name="room_status_blacklisted">您的设备被限制接入，请联系管理员</string>
+    <string name="room_status_not_open">房间暂未开放</string>
+    <string name="room_status_disabled">房间已被关闭</string>
+    <string name="room_status_expired">申请已超时，请联系管理员重新申请</string>
 </resources>

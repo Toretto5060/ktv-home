@@ -28,14 +28,19 @@ docker buildx inspect --bootstrap
 docker buildx build \
   --progress=plain \
   --platform linux/amd64,linux/arm64 \
-  --build-arg KTV_RELEASE_VERSION=0.1.11 \
-  --build-arg KTV_RELEASE_VERSION_CODE=12 \
-  -t toretto5060/ktv-home:0.1.11 \
+  --build-arg KTV_RELEASE_VERSION=0.1.12 \
+  --build-arg KTV_RELEASE_VERSION_CODE=13 \
+  -t toretto5060/ktv-home:0.1.12 \
   -t toretto5060/ktv-home:latest \
   --push \
   -f backend/Dockerfile \
   .
 这一步会同时编译 amd64 和 arm64 两个镜像并一起推送，耗时较长（15~30 分钟），但镜像在所有平台上都能原生运行。
+
+docker exec -it ktv-db psql -h 127.0.0.1 -p 5433 -U toretto -d ktv-db -c "
+DELETE FROM room_applications WHERE device_id LIKE 'tv-%';
+DELETE FROM rooms WHERE device_id LIKE 'tv-%';
+DELETE FROM blacklist WHERE device_id LIKE 'tv-%';
 
 
 # 本地构建 Debug APK 需要 JDK 17 和 Android SDK：

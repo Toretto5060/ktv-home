@@ -118,6 +118,27 @@ public class WsBroadcaster {
     }
 
     /**
+     * 查找指定 deviceId 对应的会话并关闭。
+     * 用于拒绝/拉黑设备时主动断开其 WS 连接。
+     *
+     * @param deviceId 要断开的设备 ID
+     */
+    public void disconnectDeviceById(String deviceId) {
+        for (SessionInfo info : sessions.values()) {
+            Object did = info.session.getAttributes().get("device_id");
+            if (deviceId.equals(did)) {
+                log.info("主动断开设备 {} 的 WS 会话 {}", deviceId, info.sessionId);
+                try {
+                    info.session.close(CloseStatus.NORMAL);
+                } catch (IOException e) {
+                    log.debug("关闭会话失败: {}", e.getMessage());
+                }
+                return;
+            }
+        }
+    }
+
+    /**
      * TV 是否在线。
      */
     public boolean isTvOnline() {
@@ -171,6 +192,23 @@ public class WsBroadcaster {
         SessionInfo info = sessions.get(clientToken);
         if (info != null) {
             info.pendingRemoval = false;
+        }
+    }
+
+    /**
+     * 向指定设备 ID 的会话发送事件。
+     *
+     * @param deviceId 目标设备 ID
+     * @param event 要发送的事件
+     */
+    public void broadcastToDevice(String deviceId, WsEvent event) {
+        String json = serialize(event);
+        for (SessionInfo info : sessions.values()) {
+            Object did = info.session.getAttributes().get("device_id");
+            if (deviceId.equals(did)) {
+                send(info.session, json);
+                return;
+            }
         }
     }
 

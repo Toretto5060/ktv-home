@@ -89,8 +89,12 @@ public class PlaylistController {
     }
 
     private ResponseEntity<Resource> serveCover(String relativePath) {
+        if (relativePath == null || relativePath.isBlank()) return ResponseEntity.notFound().build();
         Path file = dataRoot.resolve(relativePath).normalize();
-        if (!file.startsWith(dataRoot.normalize()) || !Files.isReadable(file)) return ResponseEntity.notFound().build();
+        // 必须仍是 dataRoot 下的常规文件，否则空路径或目录会触发 "Is a directory"。
+        if (!file.startsWith(dataRoot.normalize()) || !Files.isRegularFile(file) || !Files.isReadable(file)) {
+            return ResponseEntity.notFound().build();
+        }
         String name = file.getFileName().toString().toLowerCase();
         MediaType type = name.endsWith(".png") ? MediaType.IMAGE_PNG
                 : name.endsWith(".webp") ? MediaType.parseMediaType("image/webp") : MediaType.IMAGE_JPEG;

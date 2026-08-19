@@ -2,6 +2,7 @@ package com.homektv.ws;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.homektv.library.RoomService;
 import com.homektv.queue.PlaybackService;
 import com.homektv.queue.SnapshotService;
 import org.slf4j.Logger;
@@ -12,16 +13,21 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.util.Map;
+import java.util.UUID;
+
 /**
  * KTV WebSocket 处理器（P1.13/P1.15/P1.16，详设§4.1/§4.2）。
  * - 连接建立即推送 sync_full 全量快照
  * - 接收 TV 上行 progress → 转发广播给 H5（歌词/进度同步）
  * - 接收 ping → 回 pong（心跳）
+ * - TV 设备注册 → 验证设备状态（黑名单/审批）
  *
  * KTV WebSocket handler (P1.13/P1.15/P1.16, detailed design §4.1/§4.2).
  * - Pushes a sync_full full snapshot upon connection establishment.
  * - Receives progress messages from TV → broadcasts to H5 clients (lyrics/progress sync).
  * - Receives ping → replies with pong (heartbeat).
+ * - TV device registration → validates device status (blacklist/approval).
  */
 @Component
 public class KtvWebSocketHandler extends TextWebSocketHandler {
@@ -32,20 +38,23 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
     private final SnapshotService snapshotService;
     private final PlaybackService playbackService;
     private final TvOfflineWatcher tvOfflineWatcher;
+    private final RoomService roomService;
     private final ObjectMapper mapper;
 
     public KtvWebSocketHandler(WsBroadcaster broadcaster, SnapshotService snapshotService,
                                PlaybackService playbackService, TvOfflineWatcher tvOfflineWatcher,
-                               ObjectMapper mapper) {
+                               RoomService roomService, ObjectMapper mapper) {
         this.broadcaster = broadcaster;
         this.snapshotService = snapshotService;
         this.playbackService = playbackService;
         this.tvOfflineWatcher = tvOfflineWatcher;
+        this.roomService = roomService;
         this.mapper = mapper;
     }
 
     /**
      * 连接建立后注册会话并推送全量快照；若为 TV 端则触发上线监听。
+     * TV设备需要注册验证（黑名单/审批状态）。
      *
      * Registers the session and pushes a full snapshot upon connection
      * establishment; triggers online watcher if the client is a TV.
@@ -55,7 +64,21 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         broadcaster.register(session);
+
+        // 黑名单立即拒绝（连接握手阶段，避免无效流量）
         if (isTv(session)) {
+            Object deviceIdObj = session.getAttributes().get("device_id");
+            String deviceId = deviceIdObj != null ? deviceIdObj.toString() : null;
+            if (deviceId != null) {
+                RoomService.ConnectResult probe = roomService.connect(deviceId);
+                if ("blacklisted".equals(probe.status)) {
+                    broadcaster.sendTo(session, WsEvent.of("device_blacklisted", null));
+                    session.close(CloseStatus.POLICY_VIOLATION);
+                    log.info("TV设备 {} 在黑名单中，拒绝连接", deviceId);
+                    return;
+                }
+            }
+            // 任何非黑名单的 TV 连接都取消待执行的离线清空（保持原 approved 路径的语义）
             tvOfflineWatcher.onTvConnected();
         }
         // 连接/重连即推全量快照（详设§4.1）

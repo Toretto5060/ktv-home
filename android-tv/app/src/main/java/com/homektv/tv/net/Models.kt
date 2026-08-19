@@ -126,3 +126,27 @@ data class FileSource(
     val resolution: String? = null,
     val priority: Int = 0,
 )
+
+/**
+ * TV 设备授权结果（P1.16 TV 侧）。
+ *
+ * <p>对应 GET /api/tv/authorize?device_id=xxx 的解析结果。status 取值：
+ * <ul>
+ *   <li>approved：已批准，roomId/roomName 非 null</li>
+ *   <li>pending：等待审批，applicationId/expiredAt 非 null</li>
+ *   <li>blacklisted：黑名单</li>
+ *   <li>room_not_open：房间不在开放时段</li>
+ *   <li>network_error：网络/解析异常，调用方应 30s 后重试</li>
+ * </ul>
+ */
+data class TvAuthorizeResult(
+    val status: String,
+    val roomId: String? = null,
+    val roomName: String? = null,
+    val applicationId: String? = null,
+    val expiredAt: String? = null,
+) {
+    companion object {
+        fun networkError() = TvAuthorizeResult(status = "network_error")
+    }
+}

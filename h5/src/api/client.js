@@ -186,7 +186,28 @@ export const api = {
     body.append('file', file)
     return request(`/admin/ai/playlists/${id}/cover`, { method: 'POST', body })
   },
-  adminAiReorderPlaylistSongs: (id, songIds) => request(`/admin/ai/playlists/${id}/songs/order`, { method: 'PUT', body: JSON.stringify({ songIds }) })
+  adminAiReorderPlaylistSongs: (id, songIds) => request(`/admin/ai/playlists/${id}/songs/order`, { method: 'PUT', body: JSON.stringify({ songIds }) }),
+
+  // 房间管理
+  // Room management
+  roomList: () => request('/rooms'),
+  roomApplications: () => request('/rooms/applications'),
+  approveApplication: (id) => request(`/rooms/applications/${id}/approve`, { method: 'POST' }),
+  rejectApplication: (id, reason) => request(`/rooms/applications/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  expireApplication: (id) => request(`/rooms/applications/${id}/expire`, { method: 'POST' }),
+  updateRoomName: (id, name) => request(`/rooms/${id}/name`, { method: 'PUT', body: JSON.stringify({ name }) }),
+  setRoomSchedule: (id, start, end) => request(`/rooms/${id}/schedule`, { method: 'PUT', body: JSON.stringify({ active_start: start, active_end: end }) }),
+  deleteRoom: (id) => request(`/rooms/${id}`, { method: 'DELETE' }),
+  enableRoom: (id) => request(`/rooms/${id}/enable`, { method: 'POST' }),
+  disableRoom: (id) => request(`/rooms/${id}/disable`, { method: 'POST' }),
+  refreshRoomQr: (id) => request(`/rooms/${id}/refresh-qr`, { method: 'POST' }),
+  roomMembers: (id) => request(`/rooms/${id}/members`),
+  roomJoin: (qrCode, deviceId, nickname) => request('/rooms/join', {
+    method: 'POST',
+    body: JSON.stringify({ qr_code: qrCode, device_id: deviceId, nickname })
+  }),
+  blacklist: () => request('/rooms/blacklist'),
+  removeFromBlacklist: (deviceId) => request(`/rooms/blacklist/${deviceId}`, { method: 'DELETE' })
 }
 
 /**

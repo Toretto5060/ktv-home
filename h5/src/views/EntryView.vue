@@ -3,7 +3,12 @@
     <!-- 品牌区：Logo + 标题 / Branding: logo + title -->
     <div class="logo">🎤</div>
     <div class="title">家庭KTV</div>
-    <div class="room">房间：客厅</div>
+    <div class="room" v-if="roomName">房间：{{ roomName }}</div>
+
+    <!-- 扫码成功提示 / Scan success indicator -->
+    <div v-if="scanStatus" class="scan-banner" :class="scanStatus.type">
+      {{ scanStatus.message }}
+    </div>
 
     <!-- 昵称输入区 / Nickname input -->
     <div class="field">
@@ -24,23 +29,76 @@
 /**
  * 入口页面 — 用户输入昵称后进入点歌系统。
  * 支持随机昵称生成、本地记忆和昵称冲突自动去重。
+ * 也支持扫描二维码后直接进入房间（携带 ?qr=xxx 参数）。
  *
  * Entry page — user enters a nickname and proceeds to the song-request system.
  * Supports random nickname generation, local memory, and automatic dedup on nickname conflict.
+ * Also supports direct entry via scanning a QR code (carries ?qr=xxx parameter).
  */
-import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { usePlayerStore } from '../stores/player'
 import api from '../api/client'
 
 const router = useRouter()
+const route = useRoute()
 const user = useUserStore()
 const player = usePlayerStore()
 
-// 默认回填已存昵称或随机建议值（详设 H5-01）
-	// Default: fallback to saved nickname or a random suggestion (spec H5-01)
 const nickname = ref(user.suggestNickname())
+const roomName = ref('')
+const scanStatus = ref(null)
+const scannedQrCode = ref('')
+
+// 默认回填已存昵称或随机建议值（详设 H5-01）
+// Default: fallback to saved nickname or a random suggestion (spec H5-01)
+onMounted(async () => {
+  // 检查是否通过扫码进入（URL中带 ?qr=xxx）
+  const qrFromUrl = route.query.qr
+  if (qrFromUrl) {
+    scannedQrCode.value = qrFromUrl
+    // 如果已经注册过，直接尝试加入房间
+    if (user.isRegistered) {
+      nickname.value = user.nickname
+      await tryJoinRoom()
+    }
+  }
+})
+
+/**
+ * 尝试通过二维码加入房间
+ */
+async function tryJoinRoom() {
+  if (!scannedQrCode.value) return
+  scanStatus.value = { type: 'pending', message: '正在加入房间...' }
+  try {
+    const deviceId = getDeviceId()
+    const result = await api.roomJoin(scannedQrCode.value, deviceId, nickname.value)
+    if (result.success) {
+      roomName.value = result.room_name
+      scanStatus.value = {
+        type: 'success',
+        message: `已加入房间"${result.room_name}"${result.is_new_member ? '' : '（您已在房间中）'}`
+      }
+    } else {
+      scanStatus.value = { type: 'error', message: result.message || '加入失败' }
+      scannedQrCode.value = ''
+    }
+  } catch (e) {
+    scanStatus.value = { type: 'error', message: e.message || '加入失败，请检查网络' }
+    scannedQrCode.value = ''
+  }
+}
+
+function getDeviceId() {
+  let deviceId = localStorage.getItem('home-ktv.deviceId')
+  if (!deviceId) {
+    deviceId = 'h5-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10)
+    localStorage.setItem('home-ktv.deviceId', deviceId)
+  }
+  return deviceId
+}
 
 /**
  * 点击"进入点歌"按钮：注册昵称并跳转到首页。
@@ -59,6 +117,12 @@ async function enter() {
     const res = await api.registerUser(user.clientToken, user.nickname)
     if (res?.nickname) user.setNickname(res.nickname)
   } catch { /* 离线也可继续，稍后重连同步 / offline is ok, re-sync on reconnect */ }
+
+  // 如果是扫码进入，先尝试加入房间
+  if (scannedQrCode.value) {
+    await tryJoinRoom()
+  }
+
   player.connect()
   router.replace({ name: 'home' })
 }
@@ -84,6 +148,32 @@ async function enter() {
   background: var(--panel2); border: 1px solid var(--glass-border);
   border-radius: 999px; padding: 5px 13px;
 }
+
+.scan-banner {
+  margin-top: 20px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  max-width: 100%;
+  text-align: center;
+  word-break: break-all;
+}
+.scan-banner.success {
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  color: #22c55e;
+}
+.scan-banner.error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+}
+.scan-banner.pending {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: #3b82f6;
+}
+
 .field { width: 100%; margin-top: 42px; }
 .field label { font-size: 13px; color: var(--dim); display: block; margin-bottom: 10px; }
 .input-wrap {

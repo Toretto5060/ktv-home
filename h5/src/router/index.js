@@ -34,6 +34,7 @@ const routes = [
   { path: '/admin/ktv-library/metadata-scrape', name: 'admin-metadata-scrape', component: () => import('../views/admin/MetadataScrapeView.vue'), meta: { public: true, admin: true } },
   { path: '/admin/songs', redirect: { name: 'admin-ktv-library' } },
   { path: '/admin/ai', name: 'admin-ai', component: () => import('../views/admin/AiLibraryView.vue'), meta: { public: true, admin: true } },
+  { path: '/admin/rooms', name: 'admin-rooms', component: () => import('../views/admin/RoomManagementView.vue'), meta: { public: true, admin: true } },
   { path: '/admin/settings', name: 'admin-settings', component: () => import('../views/admin/SettingsView.vue'), meta: { public: true, admin: true } }
 ]
 
