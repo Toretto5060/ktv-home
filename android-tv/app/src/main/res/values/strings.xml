@@ -49,4 +49,6 @@
     <string name="room_status_not_open">房间暂未开放</string>
     <string name="room_status_disabled">房间已被关闭</string>
     <string name="room_status_expired">申请已超时，请联系管理员重新申请</string>
+    <string name="room_status_idle">等待管理员开启房间…</string>
+    <string name="default_room_name">HOME KTV</string>
 </resources>

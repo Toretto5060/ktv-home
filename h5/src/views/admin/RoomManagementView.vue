@@ -9,40 +9,76 @@
       </header>
 
       <div class="main-layout">
-        <!-- 左侧 2/3: 已允许房间 -->
-        <div class="approved-section">
-          <div class="section-header">
-            <h2>已允许的房间</h2>
-          </div>
+        <!-- 左侧: 已允许房间 + 空闲房间（上下排列） -->
+        <div class="left-column">
+          <div class="approved-section">
+            <div class="section-header">
+              <h2>已允许的房间</h2>
+            </div>
 
-          <div v-if="loading" class="loading">加载中...</div>
-          <div v-else-if="approvedRooms.length === 0" class="empty-state">
-            暂无已允许的房间
-          </div>
-          <div v-else class="room-list">
-            <div v-for="room in approvedRooms" :key="room.id" class="room-card">
-              <div class="room-info">
-                <div class="room-name">
-                  <span class="name">{{ room.name || displayDeviceId(room.deviceId) }}</span>
-                  <span v-if="room.activeStart || room.activeEnd" class="time-badge">
-                    {{ formatTimeRange(room) }}
-                  </span>
+            <div v-if="loading" class="loading">加载中...</div>
+            <div v-else-if="approvedRooms.length === 0" class="empty-state">
+              暂无已允许的房间
+            </div>
+            <div v-else class="room-list">
+              <div v-for="room in approvedRooms" :key="room.id" class="room-card">
+                <div class="room-info">
+                  <div class="room-name">
+                    <span class="name">{{ room.name || displayDeviceId(room.deviceId) }}</span>
+                    <span v-if="room.activeStart || room.activeEnd" class="time-badge">
+                      {{ formatTimeRange(room) }}
+                    </span>
+                  </div>
+                  <div class="room-meta">
+                    <span class="device-id">设备ID: {{ displayDeviceId(room.deviceId) }}</span>
+                  </div>
                 </div>
-                <div class="room-meta">
-                  <span class="device-id">设备ID: {{ displayDeviceId(room.deviceId) }}</span>
+                <div class="room-actions">
+                  <button class="btn-icon" title="编辑名称" @click="editRoomName(room)">✎</button>
+                  <button class="btn-icon" title="设置有效期" @click="editQrExpiry(room)">⏰</button>
+                  <button class="btn-icon" title="刷新二维码" @click="refreshQr(room)">⟳</button>
+                  <button class="btn-icon" title="解散房间" @click="dissolveRoom(room)">⚡</button>
+                  <button class="btn-icon danger" title="关闭房间" @click="disableRoom(room)">✕</button>
                 </div>
               </div>
-              <div class="room-actions">
-                <button class="btn-icon" title="编辑名称" @click="editRoomName(room)">✎</button>
-                <button class="btn-icon" title="设置开放时间" @click="editRoomTime(room)">⏰</button>
-                <button class="btn-icon" title="刷新二维码" @click="refreshQr(room)">⟳</button>
-                <button class="btn-icon danger" title="关闭房间" @click="disableRoom(room)">✕</button>
+            </div>
+          </div>
+
+          <!-- 空闲房间 -->
+          <div class="idle-section">
+            <div class="section-header">
+              <h2>空闲房间</h2>
+            </div>
+
+            <div v-if="loading" class="loading">加载中...</div>
+            <div v-else-if="idleRooms.length === 0" class="empty-state small">
+              暂无空闲房间
+            </div>
+            <div v-else class="room-list">
+              <div v-for="room in idleRooms" :key="room.id" class="room-card idle-card">
+                <div class="room-info">
+                  <div class="room-name">
+                    <span class="name">{{ room.name || displayDeviceId(room.deviceId) }}</span>
+                    <span v-if="room.activeStart || room.activeEnd" class="time-badge idle-badge">
+                      {{ formatTimeRange(room) }}
+                    </span>
+                  </div>
+                  <div class="room-meta">
+                    <span class="device-id">设备ID: {{ displayDeviceId(room.deviceId) }}</span>
+                  </div>
+                </div>
+                <div class="room-actions">
+                  <button class="btn-icon" title="编辑名称" @click="editRoomName(room)">✎</button>
+                  <button class="btn-icon" title="设置有效期" @click="editQrExpiry(room)">⏰</button>
+                  <button class="btn-icon" title="开启房间" @click="enableRoom(room)">▶</button>
+                  <button class="btn-icon danger" title="关闭房间" @click="disableRoom(room)">✕</button>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 右侧 1/3: 申请房间 -->
+        <!-- 右侧: 申请房间 -->
         <div class="application-section">
           <div class="section-header">
             <h2>申请房间</h2>
@@ -106,36 +142,38 @@
       </div>
     </div>
 
-    <!-- 设置开放时间弹窗 -->
-    <div v-if="editTimeDialog" class="dialog-mask" @click.self="editTimeDialog = false">
+    <!-- 设置二维码有效期弹窗 -->
+    <div v-if="editExpiryDialog" class="dialog-mask" @click.self="editExpiryDialog = false">
       <div class="dialog">
-        <h3>设置开放时间</h3>
+        <h3>设置二维码有效期</h3>
         <div class="time-inputs">
           <div class="time-field">
             <label>开始时间</label>
-            <input v-model="editTimeStart" type="datetime-local" class="dialog-input" />
+            <input v-model="editExpiryStart" type="datetime-local" class="dialog-input" />
           </div>
           <div class="time-field">
-            <label>结束时间</label>
-            <input v-model="editTimeEnd" type="datetime-local" class="dialog-input" />
+            <label>结束时间{{ editExpiryHours === 0 && editExpiryDays === 0 ? '（手动选择）' : '（自动计算）' }}</label>
+            <input v-model="editExpiryEnd" type="datetime-local" class="dialog-input" :disabled="editExpiryHours > 0 || editExpiryDays > 0" />
           </div>
         </div>
-        <p class="time-hint">留空表示永久开放</p>
-        <div class="dialog-actions">
-          <button class="btn-secondary" @click="editTimeDialog = false">取消</button>
-          <button class="btn-primary" @click="saveRoomTime">保存</button>
+        <div class="expiry-quick">
+          <div class="expiry-field">
+            <label>小时</label>
+            <select v-model="editExpiryHours" class="dialog-select" :disabled="editExpiryDays > 0">
+              <option v-for="h in hourOptions" :key="h" :value="h">{{ h === 0 ? '不设置' : h + ' 小时' }}</option>
+            </select>
+          </div>
+          <div class="expiry-field">
+            <label>天数</label>
+            <select v-model="editExpiryDays" class="dialog-select" :disabled="editExpiryHours > 0">
+              <option v-for="d in dayOptions" :key="d" :value="d">{{ d === 0 ? '不设置' : d + ' 天' }}</option>
+            </select>
+          </div>
         </div>
-      </div>
-    </div>
-
-    <!-- 拒绝原因弹窗 -->
-    <div v-if="rejectDialog" class="dialog-mask" @click.self="rejectDialog = false">
-      <div class="dialog">
-        <h3>拒绝原因</h3>
-        <input v-model="rejectReason" type="text" placeholder="拒绝原因（可选）" class="dialog-input" />
+        <p class="time-hint">小时和天数均为 0 表示永久有效（不设置结束时间）</p>
         <div class="dialog-actions">
-          <button class="btn-secondary" @click="rejectDialog = false">取消</button>
-          <button class="btn-danger" @click="confirmReject">确认拒绝</button>
+          <button class="btn-secondary" @click="editExpiryDialog = false">取消</button>
+          <button class="btn-primary" @click="saveQrExpiry">保存</button>
         </div>
       </div>
     </div>
@@ -143,18 +181,18 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../../api/client'
 import { KtvSocket } from '../../api/ws'
 import AdminLayout from './AdminLayout.vue'
 
 const loading = ref(false)
 const approvedRooms = ref([])
+const idleRooms = ref([])
 const pendingApplications = ref([])
 const blacklist = ref([])
 /** 每秒 tick 一次触发响应式刷新（getRemainingSeconds 不是反应式，需要抖动引用）。 */
 const tickRef = ref(0)
-let refreshTimer = null
 let countdownTimer = null
 let socket = null
 
@@ -164,10 +202,14 @@ function handleWsEvent(type, _payload) {
     type === 'application_approved' ||
     type === 'application_expired' ||
     type === 'room_disabled' ||
+    type === 'room_dissolved' ||
+    type === 'room_expired' ||
+    type === 'room_promoted' ||
     type === 'room_name_changed' ||
     type === 'room_time_changed' ||
     type === 'qr_code_refreshed' ||
-    type === 'device_blacklisted'
+    type === 'device_blacklisted' ||
+    type === 'room_list_updated'
   ) {
     loadData()
   }
@@ -178,38 +220,51 @@ const editNameDialog = ref(false)
 const editNameValue = ref('')
 const editingRoom = ref(null)
 
-// 编辑时间
-const editTimeDialog = ref(false)
-const editTimeStart = ref('')
-const editTimeEnd = ref('')
+// 二维码有效期
+const editExpiryDialog = ref(false)
+const editExpiryStart = ref('')
+const editExpiryEnd = ref('')
+const editExpiryHours = ref(0)
+const editExpiryDays = ref(0)
+const hourOptions = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
+const dayOptions = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30]
 
-// 拒绝
-const rejectDialog = ref(false)
-const rejectReason = ref('')
-const rejectingApp = ref(null)
+function calcExpiryEnd() {
+  if (!editExpiryStart.value || (editExpiryHours.value === 0 && editExpiryDays.value === 0)) {
+    editExpiryEnd.value = ''
+    return
+  }
+  const start = new Date(editExpiryStart.value)
+  const hours = (editExpiryDays.value || 0) * 24 + (editExpiryHours.value || 0)
+  start.setHours(start.getHours() + hours)
+  const pad = (n) => String(n).padStart(2, '0')
+  editExpiryEnd.value = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}T${pad(start.getHours())}:${pad(start.getMinutes())}`
+}
+
+watch([editExpiryStart, editExpiryHours, editExpiryDays], calcExpiryEnd)
 
 onMounted(() => {
   loadData()
-  refreshTimer = setInterval(loadData, 10000) // 每10秒刷新兜底
   countdownTimer = setInterval(tickCountdown, 1000) // 每秒推动倒计时，倒计时归零主动 expire
   socket = new KtvSocket({ onEvent: handleWsEvent })
   socket.connect()
 })
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
   if (countdownTimer) clearInterval(countdownTimer)
   if (socket) socket.close()
 })
 
 async function loadData() {
   try {
-    const [rooms, applications, bl] = await Promise.all([
+    const [rooms, idle, applications, bl] = await Promise.all([
       api.roomList(),
+      api.idleRooms(),
       api.roomApplications(),
       api.blacklist()
     ])
     approvedRooms.value = rooms || []
+    idleRooms.value = idle || []
     pendingApplications.value = applications || []
     blacklist.value = bl || []
   } catch (e) {
@@ -286,22 +341,26 @@ async function saveRoomName() {
   }
 }
 
-function editRoomTime(room) {
+function editQrExpiry(room) {
   editingRoom.value = room
-  editTimeStart.value = room.activeStart ? room.activeStart.slice(0, 16) : ''
-  editTimeEnd.value = room.activeEnd ? room.activeEnd.slice(0, 16) : ''
-  editTimeDialog.value = true
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  const toLocal = (d) =>
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  editExpiryStart.value = room.activeStart ? room.activeStart.slice(0, 16) : toLocal(now)
+  editExpiryEnd.value = room.activeEnd ? room.activeEnd.slice(0, 16) : ''
+  editExpiryHours.value = 0
+  editExpiryDays.value = 0
+  editExpiryDialog.value = true
 }
 
-async function saveRoomTime() {
+async function saveQrExpiry() {
   if (!editingRoom.value) return
   try {
-    await api.setRoomSchedule(
-      editingRoom.value.id,
-      editTimeStart.value ? new Date(editTimeStart.value).toISOString() : null,
-      editTimeEnd.value ? new Date(editTimeEnd.value).toISOString() : null
-    )
-    editTimeDialog.value = false
+    const start = editExpiryStart.value ? new Date(editExpiryStart.value).toISOString() : null
+    const end = editExpiryEnd.value ? new Date(editExpiryEnd.value).toISOString() : null
+    await api.setQrExpiry(editingRoom.value.id, start, end)
+    editExpiryDialog.value = false
     loadData()
   } catch (e) {
     alert('保存失败: ' + e.message)
@@ -327,8 +386,27 @@ async function deleteRoom(room) {
   }
 }
 
+async function dissolveRoom(room) {
+  if (!confirm(`确定解散房间 "${room.name || room.deviceId}" 吗？解散后二维码立即失效，房间进入空闲列表。`)) return
+  try {
+    await api.dissolveRoom(room.id)
+    loadData()
+  } catch (e) {
+    alert('解散失败: ' + e.message)
+  }
+}
+
+async function enableRoom(room) {
+  try {
+    await api.enableRoom(room.id)
+    loadData()
+  } catch (e) {
+    alert('开启失败: ' + e.message)
+  }
+}
+
 async function disableRoom(room) {
-  if (!confirm(`确定关闭房间 "${room.name || room.deviceId}" 吗？关闭后该设备将重新发起申请。`)) return
+  if (!confirm(`确定关闭房间 "${room.name || room.deviceId}" 吗？关闭后房间将进入黑名单。`)) return
   try {
     await api.disableRoom(room.id)
     loadData()
@@ -347,16 +425,13 @@ async function approveApp(app) {
 }
 
 function rejectApp(app) {
-  rejectingApp.value = app
-  rejectReason.value = ''
-  rejectDialog.value = true
+  // 直接拒绝，不需要填原因
+  confirmingReject(app)
 }
 
-async function confirmReject() {
-  if (!rejectingApp.value) return
+async function confirmingReject(app) {
   try {
-    await api.rejectApplication(rejectingApp.value.id, rejectReason.value)
-    rejectDialog.value = false
+    await api.rejectApplication(app.id, '管理员拒绝')
     loadData()
   } catch (e) {
     alert('拒绝失败: ' + e.message)
@@ -416,12 +491,23 @@ async function unblockDevice(item) {
   gap: 24px;
 }
 
+.left-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .approved-section,
+.idle-section,
 .application-section {
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 20px;
+}
+
+.idle-card {
+  border-left: 3px solid #94a3b8;
 }
 
 .section-header {
@@ -498,6 +584,11 @@ async function unblockDevice(item) {
   background: #dbeafe;
   color: #1d4ed8;
   border-radius: 4px;
+}
+
+.idle-badge {
+  background: #f1f5f9;
+  color: #64748b;
 }
 
 .room-meta,
@@ -721,6 +812,46 @@ async function unblockDevice(item) {
 
 .btn-danger:hover {
   background: #b91c1c;
+}
+
+.dialog-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 14px;
+  background: #fff;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.dialog-select:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.dialog-select:disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.expiry-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.expiry-field {
+  flex: 1;
+}
+
+.expiry-field label {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 4px;
 }
 
 @media (max-width: 900px) {

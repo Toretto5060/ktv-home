@@ -50,11 +50,11 @@ export const api = {
 
   // 队列/控制（P1.9~P1.12）
   // Queue / control (P1.9~P1.12)
-  getQueue: () => request('/queue'),
-  control: (action, params = {}, clientToken) =>
+  getQueue: (roomId) => request(`/queue${roomId ? `?room_id=${encodeURIComponent(roomId)}` : ''}`),
+  control: (action, params = {}, clientToken, roomId) =>
     request('/control', {
       method: 'POST',
-      body: JSON.stringify({ action, params, client_token: clientToken })
+      body: JSON.stringify({ action, params, client_token: clientToken, room_id: roomId || undefined })
     }),
 
   // 发现/历史/心愿（P3）
@@ -196,11 +196,16 @@ export const api = {
   rejectApplication: (id, reason) => request(`/rooms/applications/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   expireApplication: (id) => request(`/rooms/applications/${id}/expire`, { method: 'POST' }),
   updateRoomName: (id, name) => request(`/rooms/${id}/name`, { method: 'PUT', body: JSON.stringify({ name }) }),
-  setRoomSchedule: (id, start, end) => request(`/rooms/${id}/schedule`, { method: 'PUT', body: JSON.stringify({ active_start: start, active_end: end }) }),
   deleteRoom: (id) => request(`/rooms/${id}`, { method: 'DELETE' }),
   enableRoom: (id) => request(`/rooms/${id}/enable`, { method: 'POST' }),
   disableRoom: (id) => request(`/rooms/${id}/disable`, { method: 'POST' }),
   refreshRoomQr: (id) => request(`/rooms/${id}/refresh-qr`, { method: 'POST' }),
+  setQrExpiry: (id, start, end) => request(`/rooms/${id}/qr-expiry`, {
+    method: 'PUT',
+    body: JSON.stringify({ start, end })
+  }),
+  dissolveRoom: (id) => request(`/rooms/${id}/dissolve`, { method: 'POST' }),
+  idleRooms: () => request('/rooms/idle'),
   roomMembers: (id) => request(`/rooms/${id}/members`),
   roomJoin: (qrCode, deviceId, nickname) => request('/rooms/join', {
     method: 'POST',
@@ -220,8 +225,8 @@ export const api = {
  * @param {string} clientToken - 客户端用户标识 / client user identifier
  * @returns {object} 控制方法集合 / collection of control methods
  */
-export function makeControls(clientToken) {
-  const c = (action, params) => api.control(action, params, clientToken)
+export function makeControls(clientToken, roomId) {
+  const c = (action, params) => api.control(action, params, clientToken, roomId)
   return {
     order: (songId, force = false) => c('order', { song_id: songId, force }),
     top: (queueId) => c('top', { queue_id: queueId }),

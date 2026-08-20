@@ -62,3 +62,9 @@ app:
 logging:
   level:
     com.homektv: INFO
+
+ktv:
+  qr:
+    # 二维码 HMAC 签名密钥（生产环境务必替换为强随机字符串）
+    # QR HMAC signing secret (replace with a strong random string in production)
+    secret: ${KTV_QR_SECRET:ktv-default-qr-secret-change-me-in-prod}

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homektv.domain.Song;
 import com.homektv.repo.SongRepository;
 import com.homektv.web.ApiException;
+import com.homektv.ws.ProgressBroadcaster;
 import org.springframework.context.event.EventListener;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -31,16 +32,19 @@ public class MusicMetadataScrapeService {
     private final MusicMetadataScrapeWorker worker;
     private final MusicMetadataApplyService applyService;
     private final ObjectMapper mapper;
+    private final ProgressBroadcaster progressBroadcaster;
 
     public MusicMetadataScrapeService(JdbcTemplate jdbc, SongRepository songRepository,
                                       MusicSourceConfigService configService, MusicMetadataScrapeWorker worker,
-                                      MusicMetadataApplyService applyService, ObjectMapper mapper) {
+                                      MusicMetadataApplyService applyService, ObjectMapper mapper,
+                                      ProgressBroadcaster progressBroadcaster) {
         this.jdbc = jdbc;
         this.songRepository = songRepository;
         this.configService = configService;
         this.worker = worker;
         this.applyService = applyService;
         this.mapper = mapper;
+        this.progressBroadcaster = progressBroadcaster;
     }
 
     @Transactional
@@ -85,6 +89,7 @@ public class MusicMetadataScrapeService {
                     """, batchId, song.getId(), song.getTitle(), song.getArtist());
         }
         dispatchAfterCommit(batchId);
+        if (progressBroadcaster != null) progressBroadcaster.broadcastScrapeProgress(details(batchId, "", 0, 20));
         return details(batchId, "", 0, 20);
     }
 
@@ -136,10 +141,18 @@ public class MusicMetadataScrapeService {
         return batch;
     }
 
+    private void broadcastScrapeProgress(String batchId) {
+        if (progressBroadcaster != null) {
+            progressBroadcaster.broadcastScrapeProgress(details(batchId, "", 0, 20));
+        }
+    }
+
     public Map<String, Object> pause(String batchId) {
         requireBatch(batchId);
         jdbc.update("UPDATE music_metadata_scrape_batches SET status='PAUSED',updated_at=now() WHERE id=? AND status='RUNNING'", batchId);
-        return details(batchId, "", 0, 20);
+        Map<String, Object> result = details(batchId, "", 0, 20);
+        if (progressBroadcaster != null) progressBroadcaster.broadcastScrapeProgress(result);
+        return result;
     }
 
     public Map<String, Object> resume(String batchId) {
@@ -151,7 +164,9 @@ public class MusicMetadataScrapeService {
         if (changed == 0) throw new ApiException("METADATA_SCRAPE_NOT_PAUSED", "当前任务不是暂停状态");
         jdbc.update("UPDATE music_metadata_scrape_items SET status='PENDING',updated_at=now() WHERE batch_id=? AND status='PROCESSING'", batchId);
         worker.process(batchId);
-        return details(batchId, "", 0, 20);
+        Map<String, Object> result = details(batchId, "", 0, 20);
+        if (progressBroadcaster != null) progressBroadcaster.broadcastScrapeProgress(result);
+        return result;
     }
 
     public Map<String, Object> retryItem(String batchId, long itemId) {
@@ -163,7 +178,9 @@ public class MusicMetadataScrapeService {
                 """, itemId, batchId);
         jdbc.update("UPDATE music_metadata_scrape_batches SET status='RUNNING',finished_at=NULL,updated_at=now() WHERE id=?", batchId);
         worker.process(batchId);
-        return details(batchId, "", 0, 20);
+        Map<String, Object> result = details(batchId, "", 0, 20);
+        if (progressBroadcaster != null) progressBroadcaster.broadcastScrapeProgress(result);
+        return result;
     }
 
     public Map<String, Object> applyItem(String batchId, long itemId, Set<String> fields, Map<String, String> overrides,

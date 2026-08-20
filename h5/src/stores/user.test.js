@@ -40,4 +40,34 @@ describe('useUserStore', () => {
     const user = useUserStore()
     expect(user.suggestNickname()).toMatch(/^家人\d{4}$/)
   })
+
+  it('未加入房间时 hasValidRoom 为 false', () => {
+    const user = useUserStore()
+    expect(user.hasValidRoom).toBe(false)
+  })
+
+  it('setJoinedRoom 持久化房间 token，hasValidRoom 变 true', () => {
+    const user = useUserStore()
+    user.setJoinedRoom('room-abc', 'room-id-1')
+    expect(user.joinedRoomToken).toBe('room-abc')
+    expect(user.roomId).toBe('room-id-1')
+    expect(user.hasValidRoom).toBe(true)
+    expect(localStorage.getItem('ktv_joined_room_token')).toBe('room-abc')
+  })
+
+  it('setJoinedRoom 空值不写', () => {
+    const user = useUserStore()
+    user.setJoinedRoom('')
+    expect(user.joinedRoomToken).toBe('')
+    expect(localStorage.getItem('ktv_joined_room_token')).toBeNull()
+  })
+
+  it('clearJoinedRoom 清空房间 token', () => {
+    const user = useUserStore()
+    user.setJoinedRoom('room-abc')
+    user.clearJoinedRoom()
+    expect(user.joinedRoomToken).toBe('')
+    expect(user.hasValidRoom).toBe(false)
+    expect(localStorage.getItem('ktv_joined_room_token')).toBeNull()
+  })
 })

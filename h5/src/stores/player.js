@@ -35,7 +35,10 @@ export const usePlayerStore = defineStore('player', {
      */
     connect() {
       if (this.socket) return
+      const user = useUserStore()
+      if (!user.roomId) return
       this.socket = new KtvSocket({
+        roomId: user.roomId,
         onEvent: (type, payload) => this.handleEvent(type, payload),
         onStatus: (ok) => { this.connected = ok }
       })

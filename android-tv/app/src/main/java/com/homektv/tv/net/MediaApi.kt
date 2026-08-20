@@ -187,15 +187,14 @@ class MediaApi(private val config: AppConfig) {
 
     /**
      * 二维码地址：http://host/api/qr?size=xxx&content=xxx（P1.30 待机页扫码引导）。
-     * TV 端直接拼好扫码内容（h5Url + "?room=default"），后端只负责 ZXing 编码，不做任何覆盖。
-     * 这样 TV 端用自己"已知对外可达"的 URL 拼内容，扫码结果严格跟 TV 当前连接一致 —— 不依赖任何反代/Host 头兜底。
+     * TV 端把后端生成的加密 token 作为扫码 URL 的 `?room=<token>` 参数。
+     * 加密 token 包含房间 ID + 开放起止时间戳 + HMAC 签名，扫码后 H5 端核验 token/有效期/房间号。
      * <p>
-     * QR endpoint. The TV composes the full scanned string (h5Url + "?room=default")
-     * and the backend only ZXing-encodes it without altering the value. The TV uses
-     * whatever URL it already knows is reachable for the phone, independent of any
-     * reverse proxy / Host header.
+     * QR endpoint. The TV uses the encrypted token from the backend as the `?room=<token>`
+     * query parameter in the scanned URL. The token contains room ID, active start/end
+     * timestamps, and HMAC signature; H5 validates token/expiry/room after scanning.
      */
-    fun qrUrl(size: Int): String {
+    fun qrUrl(size: Int, qrCode: String? = null): String {
         val h5 = config.h5Url()
         // 没配 serverHost 时，h5 形如 "http:///m"。传给后端意义不大，跳过 content，
         // 让后端走 base_url fallback（旧链路）或干脆 400 而不是吐出坏码。
@@ -205,19 +204,19 @@ class MediaApi(private val config: AppConfig) {
         if (config.serverHost.isNullOrBlank() || h5.contains(":///")) {
             return "${config.apiBase()}/qr?size=$size"
         }
-        // content 走 base_url 同一套 room 逻辑；这里直接拼完整字符串更稳：
-        // 后端不再"在末尾 +?room"，不会再出错。
-        // <p>Compose the full string here so the backend can't accidentally append
-        // ?room twice or rewrite the URL.
-        val content = "$h5?room=default"
+        // 没拿到加密 token 时回退到 ?room=default，H5 端会拿到无效提示
+        val token = qrCode?.takeIf { it.isNotBlank() }
+            ?: return "${config.apiBase()}/qr?size=$size"
+        // ?room=<encrypted_token>：H5 端从 room 参数解析并校验
+        val content = "$h5?room=$token"
         val encoded = java.net.URLEncoder.encode(content, "UTF-8")
         return "${config.apiBase()}/qr?size=$size&content=$encoded"
     }
 
     /** 拉取二维码 PNG 字节；失败返回 null。 */
-    suspend fun fetchQr(size: Int): ByteArray? = withContext(Dispatchers.IO) {
+    suspend fun fetchQr(size: Int, qrCode: String? = null): ByteArray? = withContext(Dispatchers.IO) {
         // 加时间戳参数绕过 OkHttp 缓存/CDN 缓存，确保刷新时拿到最新图片
-        val url = "${qrUrl(size)}&_t=${System.currentTimeMillis()}"
+        val url = "${qrUrl(size, qrCode)}&_t=${System.currentTimeMillis()}"
         try {
             http.newCall(Request.Builder().url(url)
                 .header("Cache-Control", "no-cache")
@@ -269,6 +268,7 @@ class MediaApi(private val config: AppConfig) {
                         status = "approved",
                         roomId = (obj["room_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
                         roomName = (obj["name"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
+                        qrCode = (obj["qr_code"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
                         applicationId = null,
                         expiredAt = null,
                     )
@@ -276,11 +276,13 @@ class MediaApi(private val config: AppConfig) {
                         status = "pending",
                         roomId = null,
                         roomName = null,
+                        qrCode = null,
                         applicationId = (obj["application_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
                         expiredAt = (obj["expired_at"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
                     )
-                    "blacklisted" -> TvAuthorizeResult(status = "blacklisted", roomId = null, roomName = null, applicationId = null, expiredAt = null)
-                    "room_not_open" -> TvAuthorizeResult(status = "room_not_open", roomId = null, roomName = null, applicationId = null, expiredAt = null)
+                    "blacklisted" -> TvAuthorizeResult(status = "blacklisted", roomId = null, roomName = null, applicationId = null, expiredAt = null, qrCode = null)
+                    "room_not_open" -> TvAuthorizeResult(status = "room_not_open", roomId = null, roomName = null, applicationId = null, expiredAt = null, qrCode = null)
+                    "idle" -> TvAuthorizeResult(status = "idle", roomId = null, roomName = null, applicationId = null, expiredAt = null, qrCode = null)
                     else -> TvAuthorizeResult.networkError()
                 }
             }

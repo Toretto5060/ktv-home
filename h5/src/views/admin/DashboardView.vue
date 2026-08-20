@@ -38,15 +38,16 @@
  * Admin dashboard page — displays source scan status, song library stats,
  * batch transcoding progress, and playback service status.
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../../api/client'
 import AdminLayout from './AdminLayout.vue'
 import { alertDialog } from '../../composables/useDialog'
+import { onWsEvent } from '../../composables/useWsBus'
 const d=ref({}),queue=ref({}),progress=ref({}),scanning=ref(false),scanResult=ref(null),scanProgress=ref({}),sourceTotal=ref(0),pendingCount=ref(0)
 const scrapeTask=ref(null)
 const router=useRouter()
-let scanTimer=null
+let offScan=null, offScrape=null
 /**
  * 播放队列当前状态的中文映射。
  *
@@ -121,47 +122,44 @@ async function load() {
 }
 
 /**
- * 启动扫描+刮削进度轮询（每秒一次）。
+ * 启动扫描+刮削进度轮询（每秒一次）。WS 接管后保留方法但不再使用。
  *
- * Start polling scan and scrape progress (once per second).
+ * Start polling scan and scrape progress (once per second). Kept for compatibility
+ * after WS takeover.
  */
-function startPolling(){if(!scanTimer)scanTimer=setInterval(pollScan,1000)}
+function startPolling(){} // WS 接管，无需轮询
 
 /**
- * 停止扫描进度轮询并清除定时器。
+ * 停止扫描进度轮询并清除定时器。WS 接管后保留方法但不再使用。
  *
- * Stop polling scan progress and clear the timer.
+ * Stop polling scan progress and clear the timer. Kept for compatibility after WS takeover.
  */
-function stopPolling(){if(scanTimer){clearInterval(scanTimer);scanTimer=null}}
+function stopPolling(){} // WS 接管，无需轮询
 
 /**
  * 轮询扫描+刮削进度；检测到扫描或刮削结束时自动停止轮询并刷新数据。
+ * WS 接管后改为 WS 事件处理器。
  *
  * Poll scan and scrape progress; when any of them completes, stop polling
  * and refresh dashboard data automatically.
- * @returns {Promise<void>}
+ * Now replaced by WS event handlers.
  */
-async function pollScan() {
+async function handleScanProgress(payload) {
   const prevScan = scanning.value
-  const sp = await api.adminScanProgress().catch(() => scanProgress.value)
-  scanProgress.value = sp
-  scanning.value = !!sp.running
-  if (prevScan && !sp.running) {
-    scanResult.value = sp
+  scanProgress.value = payload
+  scanning.value = !!payload.running
+  if (prevScan && !payload.running) {
+    scanResult.value = payload
     await load()
-    return
   }
-  try {
-    const r = await api.adminLatestMetadataScrape()
-    scrapeTask.value = r.exists ? r : null
-    if (scrapeTask.value && scrapeTask.value.status === 'RUNNING' && !scanTimer) startPolling()
-    else if (!scrapeTask.value || (scrapeTask.value.status !== 'RUNNING' && scrapeTask.value.status !== 'PENDING')) {
-      const stillScanning = !!(await api.adminScanProgress().catch(() => ({}))).running
-      if (!stillScanning) stopPolling()
-    }
-  } catch {
-    const stillScanning = !!(await api.adminScanProgress().catch(() => ({}))).running
-    if (!stillScanning) stopPolling()
+}
+
+async function handleScrapeProgress(payload) {
+  scrapeTask.value = payload.exists !== false ? payload : null
+  if (scrapeTask.value && scrapeTask.value.status === 'RUNNING' && scrapeTask.value.total) {
+    // running
+  } else if (!scrapeTask.value || (scrapeTask.value.status !== 'RUNNING' && scrapeTask.value.status !== 'PENDING')) {
+    await load()
   }
 }
 
@@ -192,10 +190,15 @@ function formatTime(value){return new Date(value).toLocaleString('zh-CN',{hour12
  * 格式化刮削阈值百分比。
  */
 function formatScrapeThreshold(v){return v!=null?Math.round(v*100)+'%':'—'}
-/** 挂载时加载仪表盘数据。 / Load dashboard data on mount. */
-onMounted(load)
-/** 卸载时停止轮询。 / Stop polling on unmount. */
-onUnmounted(stopPolling)
+/** 挂载时加载仪表盘数据，并监听 WS 进度事件。 / Load dashboard data on mount and subscribe to WS events. */
+onMounted(async () => {
+  await load()
+  offScan = onWsEvent('scan_progress', handleScanProgress)
+  offScrape = onWsEvent('scrape_progress', handleScrapeProgress)
+})
+
+/** 卸载时取消 WS 订阅。 / Stop WS subscriptions on unmount. */
+onBeforeUnmount(() => { offScan?.(); offScrape?.() })
 </script>
 <style scoped>
 .page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}.page-head h1{font-size:22px}.page-head p{color:#64748b;font-size:13px;margin-top:6px}.primary{height:36px;padding:0 15px;border-radius:6px;background:#2563eb;color:#fff;font-size:13px}.primary:disabled{opacity:.5}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}.stats article{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px}.stats span,.stats small{display:block;color:#64748b;font-size:12px}.stats strong{display:block;font-size:26px;margin:8px 0 6px}.stats small{color:#94a3b8}.scan-progress{padding:14px 16px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;margin-bottom:14px;color:#1e40af}.scan-progress.complete{background:#f0fdf4;border-color:#bbf7d0;color:#166534}.progress-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.progress-head div{min-width:0}.progress-head strong,.progress-head span{display:block}.progress-head span{margin-top:4px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.progress-head b{font-size:18px}.track{height:7px;margin:12px 0 9px;background:#dbeafe;border-radius:4px;overflow:hidden}.complete .track{background:#dcfce7}.track i{display:block;height:100%;background:#2563eb;transition:width .25s}.complete .track i{background:#16a34a}.progress-meta{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:12px}.progress-meta .failed{color:#b91c1c;font-weight:700}.scrape-progress{padding:14px 16px;background:#f5f0ff;border:1px solid #ddd6fe;border-radius:8px;margin-bottom:14px;color:#5b21b6;cursor:pointer;transition:box-shadow .15s,border-color .15s}.scrape-progress:hover{box-shadow:0 2px 12px rgba(139,92,246,.15);border-color:#c4b5fd}.scrape-progress.complete{background:#f0fdf4;border-color:#bbf7d0;color:#166534}.scrape-progress .progress-head{position:relative}.scrape-progress .progress-head div{flex:1}.scrape-click-hint{position:absolute;right:0;top:50%;transform:translateY(-50%);font-size:11px;color:#7c3aed;opacity:.7;white-space:nowrap}.scrape-progress.complete .scrape-click-hint{color:#166534}.panel-head{display:flex;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #e2e8f0}.text-btn,.link{color:#2563eb;font-size:12px}.link:disabled{color:#94a3b8}table{width:100%;border-collapse:collapse;font-size:12px}th{padding:11px 14px;text-align:left;background:#f8fafc;color:#64748b}td{padding:13px 14px;border-top:1px solid #eef2f7;color:#475569}td strong,td small{display:block}td small{color:#94a3b8;margin-top:4px}.status{display:inline-flex;padding:3px 8px;border-radius:999px;font-weight:600}.green{background:#dcfce7;color:#166534}.blue{background:#dbeafe;color:#1d4ed8}.neutral{background:#f1f5f9;color:#475569}@media(max-width:900px){.stats{grid-template-columns:1fr 1fr}.panel{overflow:auto}table{min-width:760px}}

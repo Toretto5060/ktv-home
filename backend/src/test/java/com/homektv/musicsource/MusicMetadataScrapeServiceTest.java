@@ -3,6 +3,7 @@ package com.homektv.musicsource;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homektv.domain.Song;
 import com.homektv.repo.SongRepository;
+import com.homektv.ws.ProgressBroadcaster;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -73,7 +74,7 @@ class MusicMetadataScrapeServiceTest {
             return songs;
         });
         service = new MusicMetadataScrapeService(jdbc, songRepository, configService, worker,
-                applyService, new ObjectMapper());
+                applyService, new ObjectMapper(), mock(ProgressBroadcaster.class));
     }
 
     @Test

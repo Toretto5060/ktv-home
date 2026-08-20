@@ -8,6 +8,8 @@ import com.homektv.media.MediaProbe;
 import com.homektv.repo.MediaImportRecordRepository;
 import com.homektv.repo.SongFileRepository;
 import com.homektv.web.ApiException;
+import com.homektv.ws.ProgressBroadcaster;
+import com.homektv.ws.WsEvent;
 import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
@@ -53,6 +55,7 @@ public class MediaImportService {
     private final LibraryScanService scanService;
     private final SettingService settingService;
     private final MediaTranscoder mediaTranscoder;
+    private final ProgressBroadcaster progressBroadcaster;
     private final ExecutorService transcodeExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "source-library-transcode");
         thread.setDaemon(true);
@@ -78,7 +81,8 @@ public class MediaImportService {
     public MediaImportService(AppProperties props, FFprobeService ffprobeService, FileHashService hashService,
                               MediaImportRecordRepository importRepo, SongFileRepository songFileRepo,
                               LibraryScanService scanService, SettingService settingService,
-                              MediaTranscoder mediaTranscoder, TagReader tagReader) {
+                              MediaTranscoder mediaTranscoder, TagReader tagReader,
+                              ProgressBroadcaster progressBroadcaster) {
         this.props = props;
         this.ffprobeService = ffprobeService;
         this.tagReader = tagReader;
@@ -88,6 +92,7 @@ public class MediaImportService {
         this.scanService = scanService;
         this.settingService = settingService;
         this.mediaTranscoder = mediaTranscoder;
+        this.progressBroadcaster = progressBroadcaster;
     }
 
     /** Compatibility constructor for existing unit tests and integrations. */
@@ -96,7 +101,7 @@ public class MediaImportService {
                               LibraryScanService scanService, SettingService settingService,
                               MediaTranscoder mediaTranscoder) {
         this(props, ffprobeService, hashService, importRepo, songFileRepo, scanService, settingService,
-                mediaTranscoder, new TagReader());
+                mediaTranscoder, new TagReader(), null);
     }
 
     public record SourceScanResult(int scanned, int copied, int pendingTranscode,
@@ -129,6 +134,18 @@ public class MediaImportService {
 
     public record AutoCleanupResult(int scanned, int eligible, int deleted, int skipped, int failed) {}
 
+    private void broadcastScan(SourceScanProgress p) {
+        if (progressBroadcaster != null) {
+            progressBroadcaster.broadcastScanProgress(WsEvent.SCAN_PROGRESS, p, p.running());
+        }
+    }
+
+    private void broadcastTranscode(TranscodeProgress p) {
+        if (progressBroadcaster != null) {
+            progressBroadcaster.broadcastTranscodeProgress(p, p.running());
+        }
+    }
+
     public synchronized SourceScanResult scanSourceLibrary() {
         Path sourceRoot = sourceRoot();
         Path targetRoot = targetRoot();
@@ -138,12 +155,14 @@ public class MediaImportService {
         OffsetDateTime startedAt = OffsetDateTime.now();
         scanProgress.set(new SourceScanProgress(true, files.size(), 0, null, 0, 0, 0, 0, 0, 0,
                 startedAt, null));
+        broadcastScan(scanProgress.get());
         int copied = 0, pending = 0, sourceDup = 0, outputDup = 0, unrecognized = 0, failed = 0;
         for (int index = 0; index < files.size(); index++) {
             Path source = files.get(index);
             scanProgress.set(new SourceScanProgress(true, files.size(), index,
                     source.getFileName().toString(), copied, pending, sourceDup, outputDup, unrecognized, failed,
                     startedAt, null));
+            broadcastScan(scanProgress.get());
             try {
                 ScanOutcome outcome = analyzeAndMaybeCopy(source, targetRoot);
                 switch (outcome) {
@@ -162,11 +181,13 @@ public class MediaImportService {
             scanProgress.set(new SourceScanProgress(true, files.size(), index + 1,
                     source.getFileName().toString(), copied, pending, sourceDup, outputDup, unrecognized, failed,
                     startedAt, null));
+            broadcastScan(scanProgress.get());
         }
         SourceScanResult result = new SourceScanResult(files.size(), copied, pending, sourceDup, outputDup,
                 unrecognized, failed);
         scanProgress.set(new SourceScanProgress(false, files.size(), files.size(), null, copied, pending,
                 sourceDup, outputDup, unrecognized, failed, startedAt, OffsetDateTime.now()));
+        broadcastScan(scanProgress.get());
         return result;
     }
 
@@ -177,6 +198,7 @@ public class MediaImportService {
             scanScheduled = true;
             scanProgress.set(new SourceScanProgress(true, 0, 0, null, 0, 0, 0, 0, 0, 0,
                     OffsetDateTime.now(), null));
+            broadcastScan(scanProgress.get());
             scanExecutor.submit(() -> {
                 try {
                     scanSourceLibrary();
@@ -186,6 +208,7 @@ public class MediaImportService {
                             failed.copied(), failed.pendingTranscode(), failed.skippedSourceDuplicate(),
                             failed.skippedOutputDuplicate(), failed.unrecognized(), failed.failed() + 1,
                             failed.startedAt(), OffsetDateTime.now()));
+                    broadcastScan(scanProgress.get());
                 } finally {
                     synchronized (scanStartLock) {
                         scanScheduled = false;
@@ -241,6 +264,7 @@ public class MediaImportService {
             TranscodeProgress initial = new TranscodeProgress(running, candidates.size(), 0, 0, 0, 0, 0, 0,
                     null, null, List.of(), OffsetDateTime.now(), running ? null : OffsetDateTime.now());
             progress.set(initial);
+            broadcastTranscode(initial);
             if (running) transcodeExecutor.submit(this::runTranscodeQueue);
             return initial;
         }
@@ -462,32 +486,38 @@ public class MediaImportService {
                     currentRecordId = null;
                     priorityRecordIds.clear();
                     TranscodeProgress current = progress.get();
-                    progress.set(copyProgress(current, current.total(), current.completed(), current.transcoded(),
+                    TranscodeProgress updated = copyProgress(current, current.total(), current.completed(), current.transcoded(),
                             current.copiedSkipped(), current.skippedSourceDuplicate(), current.skippedOutputDuplicate(),
-                            current.failed(), null, null, List.of(), false, OffsetDateTime.now()));
+                            current.failed(), null, null, List.of(), false, OffsetDateTime.now());
+                    progress.set(updated);
+                    broadcastTranscode(updated);
                     return;
                 }
                 currentRecordId = nextId;
                 priorityRecordIds.remove(nextId);
                 record = importRepo.findById(nextId).orElse(null);
                 TranscodeProgress current = progress.get();
-                progress.set(copyProgress(current, current.total(), current.completed(), current.transcoded(),
+                TranscodeProgress updated = copyProgress(current, current.total(), current.completed(), current.transcoded(),
                         current.copiedSkipped(), current.skippedSourceDuplicate(), current.skippedOutputDuplicate(),
                         current.failed(), record == null ? String.valueOf(nextId) : record.getSourceFilename(),
-                        nextId, List.copyOf(priorityRecordIds), true, null));
+                        nextId, List.copyOf(priorityRecordIds), true, null);
+                progress.set(updated);
+                broadcastTranscode(updated);
             }
 
             TranscodeOutcome outcome = record == null ? TranscodeOutcome.FAILED : transcodeRecord(record);
             synchronized (transcodeLock) {
                 TranscodeProgress current = progress.get();
                 currentRecordId = null;
-                progress.set(copyProgress(current, current.total(), current.completed() + 1,
+                TranscodeProgress updated = copyProgress(current, current.total(), current.completed() + 1,
                         current.transcoded() + (outcome == TranscodeOutcome.TRANSCODED ? 1 : 0),
                         current.copiedSkipped(),
                         current.skippedSourceDuplicate() + (outcome == TranscodeOutcome.SOURCE_DUPLICATE ? 1 : 0),
                         current.skippedOutputDuplicate() + (outcome == TranscodeOutcome.OUTPUT_DUPLICATE ? 1 : 0),
                         current.failed() + (outcome == TranscodeOutcome.FAILED ? 1 : 0),
-                        null, null, List.copyOf(priorityRecordIds), true, null));
+                        null, null, List.copyOf(priorityRecordIds), true, null);
+                progress.set(updated);
+                broadcastTranscode(updated);
             }
         }
     }

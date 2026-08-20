@@ -14,6 +14,8 @@ import com.homektv.repo.SongRepository;
 import com.homektv.repo.MediaImportRecordRepository;
 import com.homektv.domain.MediaImportRecord;
 import com.homektv.web.ApiException;
+import com.homektv.ws.ProgressBroadcaster;
+import com.homektv.ws.WsEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Transactional;
@@ -45,12 +47,14 @@ public class AiLibraryService {
     private final AiClassificationApplier classificationApplier;
     private final OpenAiCompatibleClient aiClient;
     private final MediaImportRecordRepository importRecordRepository;
+    private final ProgressBroadcaster progressBroadcaster;
 
     public AiLibraryService(AiAnalysisTaskRepository taskRepository, SongRepository songRepository,
                             PlaylistRepository playlistRepository, PlaylistSongRepository playlistSongRepository,
                             AiAnalysisWorker worker, ObjectMapper objectMapper, AiConfigService configService,
                             AssetWriter assetWriter, AiClassificationApplier classificationApplier,
-                            OpenAiCompatibleClient aiClient, MediaImportRecordRepository importRecordRepository) {
+                            OpenAiCompatibleClient aiClient, MediaImportRecordRepository importRecordRepository,
+                            ProgressBroadcaster progressBroadcaster) {
         this.taskRepository = taskRepository;
         this.songRepository = songRepository;
         this.playlistRepository = playlistRepository;
@@ -62,6 +66,7 @@ public class AiLibraryService {
         this.classificationApplier = classificationApplier;
         this.aiClient = aiClient;
         this.importRecordRepository = importRecordRepository;
+        this.progressBroadcaster = progressBroadcaster;
     }
 
     /**

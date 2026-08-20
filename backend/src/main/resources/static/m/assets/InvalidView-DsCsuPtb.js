@@ -1,0 +1,1 @@
+import{_ as e,d as a,i as s}from"./index-B30f8Vwe.js";const t={class:"invalid-shell","aria-hidden":"true"},_={__name:"InvalidView",setup(c){return(i,n)=>(s(),a("div",t))}},d=e(_,[["__scopeId","data-v-1c9b76da"]]);export{d as default};

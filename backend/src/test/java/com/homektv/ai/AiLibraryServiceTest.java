@@ -10,6 +10,7 @@ import com.homektv.repo.MediaImportRecordRepository;
 import com.homektv.repo.PlaylistRepository;
 import com.homektv.repo.PlaylistSongRepository;
 import com.homektv.repo.SongRepository;
+import com.homektv.ws.ProgressBroadcaster;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -126,6 +127,7 @@ class AiLibraryServiceTest {
         return new AiLibraryService(mock(AiAnalysisTaskRepository.class), songRepository,
                 playlistRepository, playlistSongRepository, mock(AiAnalysisWorker.class),
                 objectMapper, configService, mock(AssetWriter.class),
-                mock(AiClassificationApplier.class), aiClient, mock(MediaImportRecordRepository.class));
+                mock(AiClassificationApplier.class), aiClient, mock(MediaImportRecordRepository.class),
+                mock(ProgressBroadcaster.class));
     }
 }

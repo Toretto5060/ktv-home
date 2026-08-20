@@ -115,21 +115,19 @@ class AppConfig(context: Context) {
     /** 设备唯一标识（基于 Android ID + 安装时间，用于房间识别）。 */
     val deviceId: String
         get() {
-            // 先取已存的 deviceId
             val stored = prefs.getString(KEY_DEVICE_ID, null)
             if (stored != null && !isKnownBadDeviceId(stored)) {
                 return stored
             }
-            // 旧值已知坑（"tv-android_id" 等）→ 重新生成；第一次启动也走这里
+            // 旧值是坏格式 → 重新生成；第一次启动也走这里
             val raw = android.provider.Settings.Secure.getString(
                 appContext.contentResolver,
                 android.provider.Settings.Secure.ANDROID_ID,
             ).orEmpty()
-            // Android ID 在模拟器 / Android TV / 部分 ROM 上经常返回字面 "android_id" 或太短，
-            // 必须过滤掉，否则全设备会共用同一个 id 导致 rooms_device_id_key 冲突
             val isValidHex = raw.length in 8..32 && raw.matches(Regex("^[0-9a-fA-F]+$"))
-            val androidId = if (isValidHex) raw else java.util.UUID.randomUUID().toString().take(8)
-            val id = "tv-$androidId"
+            val androidId = if (isValidHex) raw else java.util.UUID.randomUUID().toString().take(16)
+            // 不用 "tv-" 前缀，数据库字段只存纯 hex，避免迁移陷阱
+            val id = androidId
             android.util.Log.i("AppConfig", "Generated deviceId=$id (raw='$raw', validHex=$isValidHex, previousStored='$stored')")
             prefs.edit { putString(KEY_DEVICE_ID, id) }
             return id
@@ -137,14 +135,13 @@ class AppConfig(context: Context) {
 
     /** 过滤历史上被坑出来的 deviceId，避免反复撞 unique。 */
     private fun isKnownBadDeviceId(id: String): Boolean {
-        // "tv-android_id" 字面字符串（Settings.Secure.ANDROID_ID 在某些 ROM 上就是这个字面值）
-        // 或 tv- 后跟非 hex 短字符串
-        if (id == "tv-android_id") return true
-        if (id.startsWith("tv-") && id.length <= 11) {
-            val suffix = id.removePrefix("tv-")
-            val looksHex = suffix.length >= 8 && suffix.matches(Regex("^[0-9a-fA-F]+$"))
-            if (!looksHex) return true
-        }
+        // "android_id" 字面字符串（Settings.Secure.ANDROID_ID 在某些 ROM 上就是这个字面值）
+        // 或 tv- 前缀的老格式
+        if (id == "android_id" || id == "tv-android_id") return true
+        // tv- 开头的是旧格式，需要迁移
+        if (id.startsWith("tv-")) return true
+        // 纯非 hex 内容直接排除
+        if (!id.matches(Regex("^[0-9a-fA-F]+$")) && !id.matches(Regex("^[0-9a-f]+$"))) return true
         return false
     }
 

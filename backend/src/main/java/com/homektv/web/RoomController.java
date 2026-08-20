@@ -5,10 +5,13 @@ import com.homektv.domain.Room;
 import com.homektv.domain.RoomApplication;
 import com.homektv.domain.RoomMember;
 import com.homektv.library.RoomService;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -78,17 +81,6 @@ public class RoomController {
     }
 
     /**
-     * 设置房间开放时间
-     */
-    @PutMapping("/{id}/schedule")
-    public ResponseEntity<?> setRoomSchedule(@PathVariable UUID id, @RequestBody Map<String, String> body) {
-        LocalDateTime start = body.get("active_start") != null ? LocalDateTime.parse(body.get("active_start")) : null;
-        LocalDateTime end = body.get("active_end") != null ? LocalDateTime.parse(body.get("active_end")) : null;
-        boolean success = roomService.setRoomActiveTime(id, start, end);
-        return success ? ResponseEntity.ok().build() : ResponseEntity.notFound().build();
-    }
-
-    /**
      * 删除房间：将 Room 及对应的 Application 一起删除。
      */
     @DeleteMapping("/{id}")
@@ -98,7 +90,7 @@ public class RoomController {
     }
 
     /**
-     * 重新开启房间
+     * 重新开启房间（从 IDLE 升为 APPROVED）
      */
     @PostMapping("/{id}/enable")
     public ResponseEntity<?> enableRoom(@PathVariable UUID id) {
@@ -107,12 +99,29 @@ public class RoomController {
     }
 
     /**
-     * 关闭房间：删除 Room + Application，APK 会重新发起申请并显示"等待审批"蒙版。
+     * 解散房间：失效二维码，保留房间（房间仍在已允许列表）
+     */
+    @PostMapping("/{id}/dissolve")
+    public ResponseEntity<?> dissolveRoom(@PathVariable UUID id) {
+        boolean success = roomService.dissolveRoom(id);
+        return success ? ResponseEntity.ok().build() : ResponseEntity.notFound().build();
+    }
+
+    /**
+     * 关闭房间（APPROVED → IDLE）
      */
     @PostMapping("/{id}/disable")
     public ResponseEntity<?> disableRoom(@PathVariable UUID id) {
         boolean success = roomService.disableRoom(id);
         return success ? ResponseEntity.ok().build() : ResponseEntity.notFound().build();
+    }
+
+    /**
+     * 获取所有空闲房间
+     */
+    @GetMapping("/idle")
+    public List<Room> getIdleRooms() {
+        return roomService.getIdleRooms();
     }
 
     /**
@@ -122,6 +131,21 @@ public class RoomController {
     public ResponseEntity<?> refreshQrCode(@PathVariable UUID id) {
         String qrCode = roomService.refreshQrCode(id);
         return qrCode != null ? ResponseEntity.ok(Map.of("qr_code", qrCode)) : ResponseEntity.notFound().build();
+    }
+
+    /**
+     * 设置二维码有效期
+     * @param body 包含 start（ISO时间字符串，可为null）和 end（ISO时间字符串，可为null）
+     *             两者都为 null 表示永久有效
+     */
+    @PutMapping("/{id}/qr-expiry")
+    public ResponseEntity<?> setQrExpiry(@PathVariable UUID id, @RequestBody Map<String, Object> body) {
+        String startStr = body.get("start") != null ? String.valueOf(body.get("start")) : null;
+        String endStr = body.get("end") != null ? String.valueOf(body.get("end")) : null;
+        LocalDateTime start = startStr != null ? LocalDateTime.ofInstant(Instant.parse(startStr), ZoneId.systemDefault()) : null;
+        LocalDateTime end = endStr != null ? LocalDateTime.ofInstant(Instant.parse(endStr), ZoneId.systemDefault()) : null;
+        boolean success = roomService.setRoomActiveTime(id, start, end);
+        return success ? ResponseEntity.ok().build() : ResponseEntity.notFound().build();
     }
 
     /**
@@ -154,7 +178,8 @@ public class RoomController {
                     "is_new_member", result.isNewMember
             ));
         } else {
-            return ResponseEntity.ok(Map.of(
+            // 用 403 让前端能区分业务错误（可展示弹窗）和网络错误（catch 到的非 2xx）
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of(
                     "success", false,
                     "message", result.message
             ));

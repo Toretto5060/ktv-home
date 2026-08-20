@@ -41,6 +41,11 @@ public class SnapshotService {
 
     @Transactional(readOnly = true)
     public QueueSnapshot snapshot() {
+        return snapshot(null);
+    }
+
+    @Transactional(readOnly = true)
+    public QueueSnapshot snapshot(String roomId) {
         PlayerState ps = playerRepo.getSingleton();
         List<QueueItem> waiting = queueRepo.findByStatusOrderByOrderIndexAsc(QueueService.WAITING);
 
@@ -74,7 +79,7 @@ public class SnapshotService {
 
         return new QueueSnapshot(nowPlaying, list, ps.getState(), ps.getVolume(),
                 ps.isMuted(), ps.getVocalMode(),
-                broadcaster.isTvOnline(), broadcaster.h5Count());
+                broadcaster.isTvOnline(roomId), broadcaster.h5Count(roomId));
     }
 
     private Song songOf(Map<Long, Song> cache, Long id) {

@@ -9,8 +9,13 @@ import com.homektv.repo.BlacklistRepository;
 import com.homektv.repo.RoomApplicationRepository;
 import com.homektv.repo.RoomMemberRepository;
 import com.homektv.repo.RoomRepository;
+import com.homektv.security.QrTokenCipher;
+import com.homektv.security.QrTokenCipher.QrTokenInvalidException;
 import com.homektv.ws.WsBroadcaster;
 import com.homektv.ws.WsEvent;
+
+import java.util.Map;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -33,15 +38,17 @@ public class RoomService {
     private final RoomMemberRepository memberRepository;
     private final BlacklistRepository blacklistRepository;
     private final WsBroadcaster broadcaster;
+    private final QrTokenCipher qrCipher;
 
     public RoomService(RoomRepository roomRepository, RoomApplicationRepository applicationRepository,
                        RoomMemberRepository memberRepository, BlacklistRepository blacklistRepository,
-                       WsBroadcaster broadcaster) {
+                       WsBroadcaster broadcaster, QrTokenCipher qrCipher) {
         this.roomRepository = roomRepository;
         this.applicationRepository = applicationRepository;
         this.memberRepository = memberRepository;
         this.blacklistRepository = blacklistRepository;
         this.broadcaster = broadcaster;
+        this.qrCipher = qrCipher;
     }
 
     /**
@@ -67,10 +74,19 @@ public class RoomService {
             // 检查房间是否在开放时间内
             if (!room.isInActiveTime()) {
                 log.info("设备 {} 的房间 {} 未在开放时间内", deviceId, room.getId());
-                return ConnectResult.roomNotOpen();
+                return ConnectResult.roomNotOpen(room);
             }
             log.info("设备 {} 连接成功，房间 {}", deviceId, room.getName());
             return ConnectResult.approved(room);
+        }
+
+        // 2b. 检查是否是空闲房间（等待管理员开启）
+        Optional<Room> idleRoom = roomRepository.findByDeviceId(deviceId)
+                .filter(r -> r.getStatus() == Room.RoomStatus.IDLE);
+        if (idleRoom.isPresent()) {
+            Room room = idleRoom.get();
+            log.info("设备 {} 是空闲房间，等待管理员开启", deviceId);
+            return ConnectResult.idle(room);
         }
 
         // 3. 检查是否有pending申请
@@ -80,8 +96,9 @@ public class RoomService {
         if (!pendingApps.isEmpty()) {
             RoomApplication app = pendingApps.get(0);
             if (!app.isExpired()) {
+                Room room = roomRepository.findByDeviceId(deviceId).orElse(null);
                 log.info("设备 {} 有待处理申请", deviceId);
-                return ConnectResult.pending(app);
+                return ConnectResult.pending(app, room);
             }
         }
 
@@ -96,16 +113,30 @@ public class RoomService {
             List<RoomApplication> existingApps = applicationRepository.findByStatus(ApplicationStatus.PENDING)
                     .stream().filter(a -> a.getDeviceId().equals(deviceId) && !a.isExpired()).toList();
             if (!existingApps.isEmpty()) {
-                return ConnectResult.pending(existingApps.get(0));
+                RoomApplication app = existingApps.get(0);
+                Room room = roomRepository.findByDeviceId(deviceId).orElse(null);
+                return ConnectResult.pending(app, room);
             }
-            // 极少见：Room 已存在但没 pending 申请（被拒绝过） → 视作 pending 但后台再次创建申请
-            // 这种边界场景简化为返回 blacklisted 让管理员介入
+            // Room 已存在但没有 pending 申请（之前被拒绝/关闭过）→ 重新创建申请并通知管理员
+            Optional<Room> existingRoom = roomRepository.findByDeviceId(deviceId);
+            if (existingRoom.isPresent()) {
+                Room room = existingRoom.get();
+                RoomApplication newApp = new RoomApplication();
+                newApp.setDeviceId(deviceId);
+                newApp.setRoomId(room.getId());
+                newApp.setStatus(ApplicationStatus.PENDING);
+                applicationRepository.save(newApp);
+                notifyAdminNewApplication(room);
+                log.info("设备 {} 重新发起申请，房间 {}", deviceId, room.getId());
+                return ConnectResult.pending(newApp, room);
+            }
+            // 兜底：理论上不会走到这里
             return ConnectResult.blacklisted();
         }
 
         Room newRoom = new Room();
         newRoom.setDeviceId(deviceId);
-        newRoom.setName(deviceId);
+        newRoom.setName(null); // null 表示未重命名，APK 显示默认标题 HOME KTV
         newRoom.setStatus(Room.RoomStatus.PENDING);
         roomRepository.save(newRoom);
 
@@ -117,19 +148,9 @@ public class RoomService {
 
         // 通知管理员有新申请
         notifyAdminNewApplication(newRoom);
-        // 通知该设备：申请已创建，等待审批
-        try {
-            broadcaster.broadcastToDevice(deviceId, WsEvent.of("device_pending", Map.of(
-                    "device_id", deviceId,
-                    "application_id", application.getId().toString(),
-                    "expired_at", application.getExpiredAt().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
-            )));
-        } catch (Exception e) {
-            log.debug("通知TV端申请状态失败，不影响申请结果: {}", e.getMessage());
-        }
 
         log.info("设备 {} 创建新申请，房间 {}", deviceId, newRoom.getId());
-        return ConnectResult.pending(application);
+        return ConnectResult.pending(application, newRoom);
     }
 
     /**
@@ -137,16 +158,25 @@ public class RoomService {
      */
     @Transactional
     public boolean approveApplication(UUID applicationId) {
+        log.info("approveApplication 开始: {}", applicationId);
         Optional<RoomApplication> optApp = applicationRepository.findById(applicationId);
-        if (optApp.isEmpty()) return false;
+        if (optApp.isEmpty()) {
+            log.warn("approveApplication: 申请不存在 {}", applicationId);
+            return false;
+        }
 
         RoomApplication app = optApp.get();
+        log.info("approveApplication: 当前状态 {}", app.getStatus());
         if (app.getStatus() != ApplicationStatus.PENDING) return false;
 
         Optional<Room> optRoom = roomRepository.findById(app.getRoomId());
-        if (optRoom.isEmpty()) return false;
+        if (optRoom.isEmpty()) {
+            log.warn("approveApplication: 房间不存在 {}", app.getRoomId());
+            return false;
+        }
 
         Room room = optRoom.get();
+        log.info("approveApplication: 准备更新 room {} device {}", room.getId(), room.getDeviceId());
         room.setStatus(Room.RoomStatus.APPROVED);
         generateQrCode(room);
         roomRepository.save(room);
@@ -156,9 +186,22 @@ public class RoomService {
 
         // 通知TV端申请已批准（发 WS 用 try 包住，避免异常导致整个事务 rollback）
         try {
+            log.info("approveApplication: 调用 notifyTvApproved");
             notifyTvApproved(room);
         } catch (Exception e) {
             log.warn("通知TV端失败，不影响审批结果: {}", e.getMessage());
+        }
+
+        // 通知管理员申请已被批准（刷新申请列表）
+        try {
+            broadcaster.broadcast(WsEvent.of(WsEvent.APPLICATION_APPROVED, Map.of(
+                    "application_id", app.getId().toString(),
+                    "room_id", room.getId().toString(),
+                    "device_id", app.getDeviceId()
+            )));
+            broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
+        } catch (Exception e) {
+            log.warn("通知管理员失败，不影响审批结果: {}", e.getMessage());
         }
 
         log.info("申请 {} 已批准，房间 {}", applicationId, room.getName());
@@ -182,19 +225,15 @@ public class RoomService {
         // 加入黑名单
         addToBlacklist(app.getDeviceId(), "管理员拒绝: " + reason);
 
-        // 先断开该设备的 WS 连接（让其进入 onConnectionChanged(false) → HTTP 重新授权），
-        // 再发黑名单通知。
+        // 先发黑名单通知，再断开连接，最后刷新管理员列表
+        broadcaster.broadcastToRoom(app.getRoomId().toString(), WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of(
+                "device_id", app.getDeviceId(),
+                "reason", "管理员拒绝: " + reason
+        )));
+        // 再断开该设备的 WS 连接（让其进入 onConnectionChanged(false) → HTTP 重新授权）
         broadcaster.disconnectDeviceById(app.getDeviceId());
-        // 通知 TV 端被拒绝（避免 TV 端持续显示 pending 蒙版）
-        // 用 try 包住避免 WS 异常导致整个事务 rollback
-        try {
-            broadcaster.broadcast(WsEvent.of("device_blacklisted", Map.of(
-                    "device_id", app.getDeviceId(),
-                    "reason", "管理员拒绝: " + reason
-            )));
-        } catch (Exception e) {
-            log.warn("通知TV端失败，不影响拒绝结果: {}", e.getMessage());
-        }
+        // 刷新管理员页面
+        broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
 
         log.info("申请 {} 已拒绝，设备 {} 加入黑名单", applicationId, app.getDeviceId());
         return true;
@@ -209,20 +248,23 @@ public class RoomService {
         if (optRoom.isEmpty()) return false;
 
         Room room = optRoom.get();
-        room.setName(name != null && !name.isBlank() ? name : room.getDeviceId());
+        // null 或空字符串视为无重命名，清空名称
+        room.setName(name != null && !name.isBlank() ? name : null);
         roomRepository.save(room);
 
         // 通知TV端名称变更
-        broadcaster.broadcast(WsEvent.of("room_name_changed", Map.of(
+        broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_NAME_CHANGED, Map.of(
                 "room_id", room.getId().toString(),
-                "name", room.getName()
+                "name", room.getName() != null ? room.getName() : ""
         )));
 
         return true;
     }
 
     /**
-     * 设置房间开放时间
+     * 设置房间开放时间/二维码有效期（统一接口）。
+     * APPROVED 房间：更新 activeStart/activeEnd，刷新二维码并广播。
+     * IDLE 房间：更新 activeStart/activeEnd，若开始时间已到则自动升为 APPROVED。
      */
     @Transactional
     public boolean setRoomActiveTime(UUID roomId, LocalDateTime start, LocalDateTime end) {
@@ -232,18 +274,36 @@ public class RoomService {
         Room room = optRoom.get();
         room.setActiveStart(start);
         room.setActiveEnd(end);
-        roomRepository.save(room);
 
-        // 刷新二维码
-        generateQrCode(room);
-
-        // 通知TV端时间变更
-        broadcaster.broadcast(WsEvent.of("room_time_changed", Map.of(
-                "room_id", room.getId().toString(),
-                "active_start", start != null ? start.toString() : null,
-                "active_end", end != null ? end.toString() : null,
-                "qr_code", room.getQrCode()
-        )));
+        if (room.getStatus() == Room.RoomStatus.APPROVED) {
+            roomRepository.save(room);
+            generateQrCode(room);
+            broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_TIME_CHANGED, Map.of(
+                    "room_id", room.getId().toString(),
+                    "active_start", start != null ? start.toString() : "",
+                    "active_end", end != null ? end.toString() : "",
+                    "qr_code", room.getQrCode()
+            )));
+        } else {
+            boolean shouldPromote = start == null || !start.isAfter(LocalDateTime.now());
+            if (shouldPromote) {
+                room.setStatus(Room.RoomStatus.APPROVED);
+                generateQrCode(room);
+                roomRepository.save(room);
+                notifyTvApproved(room);
+                broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_PROMOTED, Map.of(
+                        "room_id", room.getId().toString(),
+                        "device_id", room.getDeviceId()
+                )));
+                // 刷新前端房间列表（空闲→已允许）
+                broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
+                log.info("空闲房间 {} 因开始时间已到，自动升为已允许", roomId);
+            } else {
+                roomRepository.save(room);
+                // 刷新前端房间列表（显示新的开始时间）
+                broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
+            }
+        }
 
         return true;
     }
@@ -269,8 +329,36 @@ public class RoomService {
     }
 
     /**
-     * 关闭房间：删除 Room + Application，通知 APK 重新发起申请。
-     * APK 收到 device_pending 后会显示"等待审批"蒙版。
+     * 解散房间：APPROVED → IDLE，进入空闲列表（清空二维码让 TV 显示等待开房）。
+     */
+    @Transactional
+    public boolean dissolveRoom(UUID roomId) {
+        Optional<Room> optRoom = roomRepository.findById(roomId);
+        if (optRoom.isEmpty()) return false;
+
+        Room room = optRoom.get();
+        if (room.getStatus() != Room.RoomStatus.APPROVED) return false;
+
+        room.setStatus(Room.RoomStatus.IDLE);
+        room.setQrCode(null);
+        room.setActiveStart(null);
+        room.setActiveEnd(null);
+        roomRepository.save(room);
+
+        // 直接通知目标 TV 进入空闲状态（带 room_id 让 TV 知道是哪个房间）
+        broadcaster.broadcastToRoom(room.getId().toString(), WsEvent.of(WsEvent.DEVICE_IDLE, Map.of(
+                "room_id", room.getId().toString(),
+                "device_id", room.getDeviceId()
+        )));
+        // 刷新管理员页面
+        broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
+
+        log.info("房间 {}（deviceId={}）已解散，进入空闲状态", roomId, room.getDeviceId());
+        return true;
+    }
+
+    /**
+     * 关闭房间：删除授权，Room 状态改回 PENDING，TV 重新走申请流程。
      */
     @Transactional
     public boolean disableRoom(UUID roomId) {
@@ -278,26 +366,42 @@ public class RoomService {
         if (optRoom.isEmpty()) return false;
 
         Room room = optRoom.get();
+        if (room.getStatus() != Room.RoomStatus.APPROVED) return false;
+
+        // 改为 REJECTED 加入黑名单，不在任何列表显示
+        room.setStatus(Room.RoomStatus.REJECTED);
+        room.setQrCode(null);
+        room.setActiveStart(null);
+        room.setActiveEnd(null);
+        roomRepository.save(room);
+
         String deviceId = room.getDeviceId();
+        addToBlacklist(deviceId, "管理员关闭房间");
 
-        applicationRepository.deleteByDeviceId(deviceId);
-        roomRepository.delete(room);
+        // 先发黑名单通知给 APK（触发弹窗），再发房间状态通知，最后刷新列表
+        broadcaster.broadcastToRoom(room.getId().toString(), WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of(
+                "device_id", deviceId,
+                "reason", "管理员关闭房间"
+        )));
+        broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_DISABLED, Map.of(
+                "room_id", room.getId().toString(),
+                "device_id", deviceId
+        )));
+        broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
 
-        // 通知 APK：记录已删除，请重新发起申请（走 connect 逻辑 → 新 Room + 新 pending Application）
-        try {
-            broadcaster.broadcast(WsEvent.of("device_pending", Map.of(
-                    "device_id", deviceId
-            )));
-        } catch (Exception e) {
-            log.warn("通知TV端失败，不影响关闭结果: {}", e.getMessage());
-        }
-
-        log.info("关闭房间 {}（deviceId={}）", roomId, deviceId);
+        log.info("房间 {}（deviceId={}）已关闭授权并加入黑名单", roomId, deviceId);
         return true;
     }
 
     /**
-     * 重新开启房间
+     * 获取所有空闲房间
+     */
+    public List<Room> getIdleRooms() {
+        return roomRepository.findByStatus(Room.RoomStatus.IDLE);
+    }
+
+    /**
+     * 重新开启房间 / 提升空闲房间为已允许：IDLE → APPROVED，刷新二维码。
      */
     @Transactional
     public boolean enableRoom(UUID roomId) {
@@ -305,12 +409,54 @@ public class RoomService {
         if (optRoom.isEmpty()) return false;
 
         Room room = optRoom.get();
+        if (room.getStatus() != Room.RoomStatus.IDLE) return false;
+
         room.setStatus(Room.RoomStatus.APPROVED);
         generateQrCode(room);
         roomRepository.save(room);
 
         notifyTvApproved(room);
+        log.info("空闲房间 {} 已开启", roomId);
         return true;
+    }
+
+    /**
+     * 定时任务：检查 APPROVED 房间是否到期、IDLE 房间是否到开始时间。
+     * 每 30 秒执行一次。
+     */
+    @Scheduled(fixedRate = 30000)
+    @Transactional
+    public void processRoomSchedules() {
+        LocalDateTime now = LocalDateTime.now();
+
+        // APPROVED 房间到期 → 移入 IDLE
+        List<Room> expiredRooms = roomRepository.findApprovedExpired(now);
+        for (Room room : expiredRooms) {
+            room.setStatus(Room.RoomStatus.IDLE);
+            roomRepository.save(room);
+            // 直接通知目标 TV 进入空闲状态
+            broadcaster.broadcastToRoom(room.getId().toString(), WsEvent.of(WsEvent.DEVICE_IDLE, Map.of(
+                    "room_id", room.getId().toString(),
+                    "device_id", room.getDeviceId()
+            )));
+            broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
+            log.info("房间 {}（deviceId={}）已到期，自动移入空闲", room.getId(), room.getDeviceId());
+        }
+
+        // IDLE 房间到达开始时间 → 升为 APPROVED
+        List<Room> readyRooms = roomRepository.findIdleReady(now);
+        for (Room room : readyRooms) {
+            room.setStatus(Room.RoomStatus.APPROVED);
+            generateQrCode(room);
+            roomRepository.save(room);
+            notifyTvApproved(room);
+            broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_PROMOTED, Map.of(
+                    "room_id", room.getId().toString(),
+                    "device_id", room.getDeviceId()
+            )));
+            broadcaster.broadcast(WsEvent.of(WsEvent.ROOM_LIST_UPDATED, Map.of()));
+            log.info("空闲房间 {} 到达开始时间，自动升为已允许", room.getId());
+        }
     }
 
     /**
@@ -325,13 +471,15 @@ public class RoomService {
         generateQrCode(room);
         roomRepository.save(room);
 
+        String qrCode = room.getQrCode() != null ? room.getQrCode() : "";
+
         // 通知TV端二维码已更新
-        broadcaster.broadcast(WsEvent.of("qr_code_refreshed", Map.of(
+        broadcaster.broadcast(WsEvent.of(WsEvent.QR_CODE_REFRESHED, Map.of(
                 "room_id", room.getId().toString(),
-                "qr_code", room.getQrCode()
+                "qr_code", qrCode
         )));
 
-        return room.getQrCode();
+        return qrCode;
     }
 
     /**
@@ -339,15 +487,38 @@ public class RoomService {
      */
     @Transactional
     public JoinResult joinRoom(String qrCode, String deviceId, String nickname) {
-        Optional<Room> optRoom = roomRepository.findById(UUID.fromString(qrCode));
+        // 解密二维码 token，提取房间 ID 并校验签名
+        QrTokenCipher.Decoded decoded;
+        try {
+            decoded = qrCipher.decode(qrCode);
+        } catch (QrTokenInvalidException e) {
+            return JoinResult.invalid("二维码无效");
+        }
+
+        Optional<Room> optRoom = roomRepository.findById(UUID.fromString(decoded.roomId()));
         if (optRoom.isEmpty()) {
             return JoinResult.invalid("二维码无效");
         }
 
         Room room = optRoom.get();
 
-        // 验证二维码是否匹配
-        if (!room.getQrCode().equals(qrCode)) {
+        // 校验 QR 版本号：每次 generateQrCode 会自增，版本不匹配说明 QR 已刷新，旧 QR 失效
+        long currentVersion = room.getQrCodeVersion() == null ? 1L : room.getQrCodeVersion();
+        if (decoded.qrCodeVersion() != currentVersion) {
+            return JoinResult.invalid("二维码已失效，请刷新后重试");
+        }
+
+        // 验证加密 token 中的有效期与房间当前开放时间一致（防历史 token 重放）
+        long nowMs = System.currentTimeMillis();
+        Long roomStartMs = room.getActiveStart() != null
+                ? room.getActiveStart().toInstant(ZoneOffset.UTC).toEpochMilli() : null;
+        Long roomEndMs = room.getActiveEnd() != null
+                ? room.getActiveEnd().toInstant(ZoneOffset.UTC).toEpochMilli() : null;
+        if (!Objects.equals(decoded.activeStartMs(), roomStartMs)
+                || !Objects.equals(decoded.activeEndMs(), roomEndMs)) {
+            return JoinResult.invalid("二维码已过期，请刷新后重试");
+        }
+        if (decoded.isExpired(nowMs)) {
             return JoinResult.invalid("二维码已过期，请刷新后重试");
         }
 
@@ -379,7 +550,7 @@ public class RoomService {
         memberRepository.save(member);
 
         // 通知TV端有人加入
-        broadcaster.broadcast(WsEvent.of("member_joined", Map.of(
+        broadcaster.broadcast(WsEvent.of(WsEvent.MEMBER_JOINED, Map.of(
                 "room_id", room.getId().toString(),
                 "device_id", deviceId,
                 "nickname", nickname,
@@ -476,13 +647,18 @@ public class RoomService {
         // 自动加入黑名单
         addToBlacklist(app.getDeviceId(), "申请超时3分钟自动拉黑");
 
-        // 通知TV端超时 + H5 刷新（try 包住避免 WS 异常导致事务 rollback）
+        // 通知TV端超时 + 管理员黑名单更新（try 包住避免 WS 异常导致事务 rollback）
         try {
             roomRepository.findById(app.getRoomId()).ifPresent(room -> {
-                broadcaster.broadcast(WsEvent.of("application_expired", Map.of(
+                broadcaster.broadcast(WsEvent.of(WsEvent.APPLICATION_EXPIRED, Map.of(
                         "room_id", room.getId().toString(),
                         "device_id", app.getDeviceId(),
                         "application_id", app.getId().toString()
+                )));
+                // 通知管理员黑名单已更新
+                broadcaster.broadcast(WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of(
+                        "device_id", app.getDeviceId(),
+                        "reason", "申请超时3分钟自动拉黑"
                 )));
             });
         } catch (Exception e) {
@@ -496,11 +672,20 @@ public class RoomService {
     }
 
     private void generateQrCode(Room room) {
-        // 生成包含房间ID的二维码内容
-        String qrContent = room.getId().toString();
-        room.setQrCode(qrContent);
-        // 管理员手动刷新或设置时间时设置过期时间（可设为30天后）
-        room.setQrExpireAt(LocalDateTime.now().plusDays(30));
+        // 加密的二维码 token：包含 roomId + QR 版本号 + 开放起止时间戳 + 随机 nonce + HMAC 签名
+        // 每次刷新都会生成不同 nonce + 自增 qrCodeVersion，二维码内容也会变化
+        Long startMs = room.getActiveStart() != null
+                ? room.getActiveStart().toInstant(ZoneOffset.UTC).toEpochMilli()
+                : null;
+        Long endMs = room.getActiveEnd() != null
+                ? room.getActiveEnd().toInstant(ZoneOffset.UTC).toEpochMilli()
+                : null;
+        // 版本号属于当前二维码本身；生成后再保存同一个版本，避免新二维码刚生成就被判定为旧码。
+        // The stored version must match the token just generated; increment before encoding.
+        long version = (room.getQrCodeVersion() == null ? 0L : room.getQrCodeVersion()) + 1L;
+        String token = qrCipher.encode(room.getId().toString(), version, startMs, endMs);
+        room.setQrCode(token);
+        room.setQrCodeVersion(version);
     }
 
     private void addToBlacklist(String deviceId, String reason) {
@@ -513,27 +698,29 @@ public class RoomService {
     }
 
     private void notifyAdminNewApplication(Room room) {
-        broadcaster.broadcast(WsEvent.of("new_room_application", Map.of(
+        broadcaster.broadcast(WsEvent.of(WsEvent.NEW_ROOM_APPLICATION, Map.of(
                 "room_id", room.getId().toString(),
                 "device_id", room.getDeviceId(),
-                "name", room.getName(),
+                "name", room.getName() != null ? room.getName() : "",
                 "created_at", room.getCreatedAt().toString()
         )));
+        log.info("已广播 new_room_application 事件，房间 {} 设备 {}", room.getId(), room.getDeviceId());
     }
 
     private void notifyTvApproved(Room room) {
-        broadcaster.broadcast(WsEvent.of("device_approved", Map.of(
+        log.info("notifyTvApproved: 准备通知房间 {} device {}", room.getId(), room.getDeviceId());
+        broadcaster.broadcastToRoom(room.getId().toString(), WsEvent.of(WsEvent.DEVICE_APPROVED, Map.of(
                 "room_id", room.getId().toString(),
-                "name", room.getName(),
-                "qr_code", room.getQrCode(),
-                "active_start", room.getActiveStart() != null ? room.getActiveStart().toString() : null,
-                "active_end", room.getActiveEnd() != null ? room.getActiveEnd().toString() : null
+                "name", room.getName() != null ? room.getName() : "",
+                "qr_code", room.getQrCode() != null ? room.getQrCode() : "",
+                "active_start", room.getActiveStart() != null ? room.getActiveStart().toString() : "",
+                "active_end", room.getActiveEnd() != null ? room.getActiveEnd().toString() : ""
         )));
     }
 
     // 结果类
     public static class ConnectResult {
-        public final String status; // blacklisted, approved, pending, room_not_open
+        public final String status; // blacklisted, approved, pending, room_not_open, idle
         public final Room room;
         public final RoomApplication application;
 
@@ -551,12 +738,35 @@ public class RoomService {
             return new ConnectResult("approved", room, null);
         }
 
-        public static ConnectResult pending(RoomApplication application) {
-            return new ConnectResult("pending", null, application);
+        public static ConnectResult pending(RoomApplication application, Room room) {
+            return new ConnectResult("pending", room, application);
         }
 
-        public static ConnectResult roomNotOpen() {
-            return new ConnectResult("room_not_open", null, null);
+        public static ConnectResult roomNotOpen(Room room) {
+            return new ConnectResult("room_not_open", room, null);
+        }
+
+        public static ConnectResult idle(Room room) {
+            return new ConnectResult("idle", room, null);
+        }
+
+        public WsEvent toWsEvent() {
+            return switch (status) {
+                case "approved" -> WsEvent.of(WsEvent.DEVICE_APPROVED, Map.of(
+                        "room_id", room.getId().toString(),
+                        "name", room.getName() == null ? "" : room.getName(),
+                        "qr_code", room.getQrCode() == null ? "" : room.getQrCode(),
+                        "active_start", room.getActiveStart() != null ? room.getActiveStart().toString() : "",
+                        "active_end", room.getActiveEnd() != null ? room.getActiveEnd().toString() : ""
+                ));
+                case "pending" -> WsEvent.of(WsEvent.DEVICE_PENDING, Map.of(
+                        "application_id", application.getId().toString(),
+                        "expired_at", application.getExpiredAt().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                ));
+                case "idle" -> WsEvent.of(WsEvent.DEVICE_IDLE, Map.of());
+                case "room_not_open" -> WsEvent.of(WsEvent.DEVICE_ROOM_NOT_OPEN, Map.of());
+                default -> WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of());
+            };
         }
     }
 

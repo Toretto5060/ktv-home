@@ -134,6 +134,7 @@ data class FileSource(
  * <ul>
  *   <li>approved：已批准，roomId/roomName 非 null</li>
  *   <li>pending：等待审批，applicationId/expiredAt 非 null</li>
+ *   <li>idle：空闲房间，等待管理员开启</li>
  *   <li>blacklisted：黑名单</li>
  *   <li>room_not_open：房间不在开放时段</li>
  *   <li>network_error：网络/解析异常，调用方应 30s 后重试</li>
@@ -145,6 +146,8 @@ data class TvAuthorizeResult(
     val roomName: String? = null,
     val applicationId: String? = null,
     val expiredAt: String? = null,
+    /** 当前 qr_code（TV 端 HTTP 授权时直接拿到，避免等 WS 的 device_approved 事件）。 */
+    val qrCode: String? = null,
 ) {
     companion object {
         fun networkError() = TvAuthorizeResult(status = "network_error")

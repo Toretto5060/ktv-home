@@ -66,11 +66,12 @@
  *
  * Source library management page — manages scanned source materials, duplicate detection, and transcode import tasks.
  */
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ChevronDown, ListRestart, RefreshCw, Trash2 } from 'lucide-vue-next'
 import api from '../../api/client'
 import AdminLayout from './AdminLayout.vue'
 import { alertDialog, confirmDialog } from '../../composables/useDialog'
+import { onWsEvent } from '../../composables/useWsBus'
 
 // 列表数据、分页、选中项 / List data, pagination, selected items
 const rows = ref([]), total = ref(0), page = ref(0), totalPages = ref(1), selected = ref([])
@@ -78,7 +79,7 @@ const cleaning = ref(false)
 // 默认展示全部源素材；格式筛选目前没有单独的界面控件。
 const filters = reactive({ keyword: '', status: '', formatAnalysis: '' })
 const progress = ref({ running:false, total:0, completed:0 })
-let timer = null
+let offTranscode = null
 
 /** 当前页是否全选（仅非删除项）/ Whether all non-deleted items on current page are selected */
 const allSelected = computed(() => rows.value.some(x => !x.sourceDeleted) && rows.value.filter(x => !x.sourceDeleted).every(x => selected.value.includes(x.id)))
@@ -96,10 +97,31 @@ const progressPercent = computed(() => progress.value.total ? Math.round(progres
 async function load() { const r = await api.adminSourceLibrary({ ...filters, page:page.value, size:20 }); rows.value=r.content||[]; total.value=r.total||0; totalPages.value=r.totalPages||1; selected.value=selected.value.filter(id=>rows.value.some(x=>x.id===id)) }
 
 /**
- * 轮询转码进度，任务结束后自动清除定时器并刷新列表。
- * Poll transcode progress; auto-clear timer and refresh list when task ends.
+ * 转码进度 WS 事件处理器，替代轮询。任务结束后刷新列表。
+ * Transcode progress WS handler, replacing polling. Refreshes list when task ends.
  */
-async function loadProgress() { progress.value = await api.adminSourceTranscodeProgress().catch(()=>progress.value); if (!progress.value.running && timer) { clearInterval(timer); timer=null; await load() } }
+async function handleTranscodeProgress(payload) {
+  progress.value = payload
+  if (!payload.running) {
+    await load()
+  }
+}
+
+/**
+ * 轮询转码进度，任务结束后自动清除定时器并刷新列表。
+ * 已废弃，保留方法签名兼容，由 WS 接管。
+ * Poll transcode progress; auto-clear timer and refresh list when task ends.
+ * Deprecated — kept for compatibility, WS now handles this.
+ */
+async function loadProgress() {}
+
+/**
+ * 启动转码任务并订阅 WS 进度事件。
+ * Start transcode task and subscribe to WS progress events.
+ *
+ * @param {number[]} ids - 源素材 ID 数组 / source material ID array
+ */
+async function startTranscode(ids){ progress.value=await api.adminStartSourceTranscode(ids); offTranscode=onWsEvent('transcode_progress', handleTranscodeProgress) }
 
 /** 搜索：重置到第一页 / Search: reset to first page */
 function search(){ page.value=0; load() }
@@ -135,21 +157,13 @@ function canPrioritize(item){ return progress.value.running && isTranscodable(it
 function priorityText(item){ return progress.value.currentRecordId===item.id?'转码中':isPrioritized(item)?'已插队':'插队' }
 
 /**
- * 启动转码任务并开始轮询进度。
- * Start transcode task and begin polling progress.
- *
- * @param {number[]} ids - 源素材 ID 数组 / source material ID array
- */
-async function startTranscode(ids){ progress.value=await api.adminStartSourceTranscode(ids); if(timer)clearInterval(timer); timer=setInterval(loadProgress,1500) }
-
-/**
  * 批量转码所有待处理的歌曲（全量模式）。
  * Batch transcode all pending songs (full mode).
  */
 async function transcodeAll(){
   if(progress.value.running)return
   if(!await confirmDialog('将处理全部待转码和转码失败的源文件。',{title:'批量转码所有歌曲'}))return
-  try { progress.value=await api.adminStartSourceTranscode([],true); if(timer)clearInterval(timer); timer=setInterval(loadProgress,1500) } catch(e) { await alertDialog(e.message||'全量转码启动失败') }
+  try { progress.value=await api.adminStartSourceTranscode([],true); offTranscode=onWsEvent('transcode_progress', handleTranscodeProgress) } catch(e) { await alertDialog(e.message||'全量转码启动失败') }
 }
 
 /**
@@ -200,7 +214,7 @@ async function transcodeOne(item){
  */
 async function prioritize(item){
   if(!canPrioritize(item))return
-  try { progress.value=(await api.adminPrioritizeSourceTranscode(item.id)).progress } catch(e) { await alertDialog(e.message||'插队失败') }
+  try { progress.value=(await api.adminPrioritizeSourceTranscode(item.id)).progress; offTranscode=onWsEvent('transcode_progress', handleTranscodeProgress) } catch(e) { await alertDialog(e.message||'插队失败') }
 }
 
 /**
@@ -265,16 +279,16 @@ function statusText(v){return{AUTO_COPIED:'已移动入库',TRANSCODED:'已转�
 function statusClass(v){return{AUTO_COPIED:'green',TRANSCODED:'green',PENDING_TRANSCODE:'blue',DUPLICATE:'amber',UNRECOGNIZED:'red',FAILED:'red'}[v]||'neutral'}
 
 /**
- * 页面挂载：加载列表数据并初始化进度轮询。
- * On mount: load list data and initialize progress polling.
+ * 页面挂载：加载列表数据并初始化 WS 订阅。
+ * On mount: load list data and initialize WS subscriptions.
  */
-onMounted(async()=>{await Promise.all([load(),loadProgress()]);if(progress.value.running)timer=setInterval(loadProgress,1500)})
+onMounted(async()=>{await Promise.all([load(),loadProgress()]);if(progress.value.running)offTranscode=onWsEvent('transcode_progress', handleTranscodeProgress)})
 
 /**
- * 页面卸载：清除进度轮询定时器。
- * On unmount: clear progress polling timer.
+ * 页面卸载：取消 WS 订阅。
+ * On unmount: cancel WS subscriptions.
  */
-onUnmounted(()=>{if(timer)clearInterval(timer)})
+onBeforeUnmount(()=>{offTranscode?.()})
 </script>
 
 <style scoped>

@@ -40,10 +40,12 @@ export class KtvSocket {
    * @param {Object}   [options]         - 配置选项 / Configuration options
    * @param {Function} [options.onEvent]  - 收到业务事件时的回调（type, payload）/ Callback on business event (type, payload)
    * @param {Function} [options.onStatus] - 连接状态变化时的回调（boolean）/ Callback on connection status change (boolean)
+   * @param {string} [options.roomId] - 服务端确认的房间 ID / server-confirmed room ID
    */
-  constructor({ onEvent, onStatus } = {}) {
+  constructor({ onEvent, onStatus, roomId } = {}) {
     this.onEvent = onEvent || (() => {})
     this.onStatus = onStatus || (() => {})
+    this.roomId = roomId || ''
     this.ws = null
     this.retry = 0
     this.pingTimer = null
@@ -68,7 +70,9 @@ export class KtvSocket {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     // 开发环境由 Vite 代理 /ws 请求；生产环境同源直连
     // Dev: Vite proxies /ws requests; production: same-origin direct connection
-    const url = `${proto}://${location.host}/ws?client_type=h5`
+    const params = new URLSearchParams({ client_type: 'h5' })
+    if (this.roomId) params.set('room_id', this.roomId)
+    const url = `${proto}://${location.host}/ws?${params.toString()}`
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {

@@ -7,6 +7,7 @@ import com.homektv.media.FFprobeService;
 import com.homektv.media.MediaProbe;
 import com.homektv.repo.MediaImportRecordRepository;
 import com.homektv.repo.SongFileRepository;
+import com.homektv.ws.ProgressBroadcaster;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -69,7 +70,8 @@ class MediaImportServiceTest {
         when(scanService.ingestLibraryFile(any(), any(), anyString(), anyString(), anyBoolean()))
                 .thenReturn(new LibraryScanService.IngestResult(true, 1L, 2L));
         service = new MediaImportService(props, probe, new FileHashService(), importRepo, songFileRepo,
-                scanService, settingService, mediaTranscoder);
+                scanService, settingService, mediaTranscoder,
+                new TagReader(), mock(ProgressBroadcaster.class));
     }
 
     @AfterEach

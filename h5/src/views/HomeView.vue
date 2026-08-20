@@ -62,7 +62,7 @@ import { Search, UserRound, Sparkles, UsersRound, ListMusic, Heart, Languages, L
 const router = useRouter()
 const user = useUserStore()
 const { toast } = useToast()
-const controls = makeControls(user.clientToken)
+const controls = makeControls(user.clientToken, user.roomId)
 
 const hot = ref([])
 const loading = ref(true)

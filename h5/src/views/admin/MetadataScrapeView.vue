@@ -124,6 +124,7 @@ import { AlertTriangle, ArrowLeft, ArrowRight, Check, ChevronDown, FileVideo2, I
 import api from '../../api/client'
 import AdminLayout from './AdminLayout.vue'
 import { alertDialog, confirmDialog } from '../../composables/useDialog'
+import { onWsEvent } from '../../composables/useWsBus'
 
 const route=useRoute(),router=useRouter()
 const task=ref(null),threshold=ref(.95),starting=ref(false),taskAction=ref(false),itemBusy=ref(null),applying=ref(false)
@@ -136,7 +137,7 @@ const reviewEdits=reactive({title:'',artist:'',album:'',releaseDate:'',aliases:'
 const reviewOriginal=reactive({language:'未知',lyricText:''})
 const reviewFields=[{key:'title',label:'歌名'},{key:'artist',label:'歌手'},{key:'album',label:'专辑'},{key:'releaseDate',label:'发行时间'},{key:'aliases',label:'别名'},{key:'cover',label:'封面'}]
 const languages=['国语','粤语','闽南语','英语','日语','韩语','纯音乐','其他','未知']
-let timer=null,refreshing=false
+let offScrape=null,refreshing=false
 const activeTask=computed(()=>task.value&&['RUNNING','PAUSED'].includes(task.value.status))
 const progressPercent=computed(()=>task.value?.total?Math.round(task.value.completed/task.value.total*100):0)
 const taskThresholdDiffers=computed(()=>task.value&&Math.abs(task.value.autoApplyThreshold-threshold.value)>.000001)
@@ -153,16 +154,25 @@ async function initialize(){
   try{const config=await api.adminMusicSourceConfig();threshold.value=config.autoApplyThreshold??.95}catch{}
   const routeIds=String(route.query.songIds||'').split(',').map(Number).filter(id=>Number.isInteger(id)&&id>0)
   if(routeIds.length){selectedIds.value=new Set(routeIds);if(routeIds.length===1&&route.query.review==='1'){try{await openStandaloneReview(await api.adminSong(routeIds[0]))}catch{}}}
-  try{const latest=await api.adminLatestMetadataScrape();if(latest.exists)task.value=latest}catch(e){await alertDialog(e.message||'刮削任务加载失败')}
-  timer=window.setInterval(refreshTask,1500)
+  try{const latest=await api.adminLatestMetadataScrape();if(latest.exists)task.value=latest;if(latest.exists&&['RUNNING','PAUSED'].includes(latest.status))offScrape=onWsEvent('scrape_progress',handleScrapeProgress)}catch(e){await alertDialog(e.message||'刮削任务加载失败')}
+}
+
+async function handleScrapeProgress(payload){
+  const prev=task.value
+  task.value={...task.value,...payload}
+  if(task.value&&task.value.items&&prev&&prev.items)task.value.items=prev.items
+  if(payload.page===undefined)taskPage.value=0
+  if(payload.status&&!['RUNNING','PAUSED'].includes(payload.status)&&(prev?.status==='RUNNING'||prev?.status==='PAUSED')){
+    offScrape?.();offScrape=null
+  }
 }
 async function startSelected(){if(!selectedIds.value.size)return;await startTask(false,[...selectedIds.value])}
 async function startAll(){if(!await confirmDialog(`将按 ${formatPercent(threshold.value)} 自动写入阈值刮削全部 KTV 歌曲，低置信结果会进入人工审核。`,{title:'刮削全部歌曲'}))return;await startTask(true,[])}
-async function startTask(all,ids){starting.value=true;try{task.value=await api.adminStartMetadataScrape({all,songIds:ids,autoApplyThreshold:threshold.value});taskPage.value=0;statusFilter.value=''}catch(e){if(e.code==='MUSIC_SOURCES_NOT_CONFIGURED'){await alertDialog('请先在系统设置中启用至少一个元数据平台。');await router.push({name:'admin-settings',query:{section:'metadata'}})}else await alertDialog(e.message||'刮削任务创建失败')}finally{starting.value=false}}
+async function startTask(all,ids){starting.value=true;try{task.value=await api.adminStartMetadataScrape({all,songIds:ids,autoApplyThreshold:threshold.value});taskPage.value=0;statusFilter.value='';offScrape=onWsEvent('scrape_progress',handleScrapeProgress)}catch(e){if(e.code==='MUSIC_SOURCES_NOT_CONFIGURED'){await alertDialog('请先在系统设置中启用至少一个元数据平台。');await router.push({name:'admin-settings',query:{section:'metadata'}})}else await alertDialog(e.message||'刮削任务创建失败')}finally{starting.value=false}}
 async function refreshTask(){if(refreshing||!task.value?.batchId)return;refreshing=true;try{task.value=await api.adminMetadataScrape(task.value.batchId,{status:statusFilter.value,page:taskPage.value,size:20})}catch{}finally{refreshing=false}}
-async function pauseTask(){taskAction.value=true;try{await api.adminPauseMetadataScrape(task.value.batchId);await refreshTask()}catch(e){await alertDialog(e.message||'暂停失败')}finally{taskAction.value=false}}
-async function resumeTask(){taskAction.value=true;try{await api.adminResumeMetadataScrape(task.value.batchId);await refreshTask()}catch(e){await alertDialog(e.message||'继续任务失败')}finally{taskAction.value=false}}
-async function retryItem(item){itemBusy.value=item.id;try{await api.adminRetryMetadataScrapeItem(task.value.batchId,item.id);await refreshTask()}catch(e){await alertDialog(e.message||'重试失败')}finally{itemBusy.value=null}}
+async function pauseTask(){taskAction.value=true;try{await api.adminPauseMetadataScrape(task.value.batchId);offScrape=onWsEvent('scrape_progress',handleScrapeProgress)}catch(e){await alertDialog(e.message||'暂停失败')}finally{taskAction.value=false}}
+async function resumeTask(){taskAction.value=true;try{await api.adminResumeMetadataScrape(task.value.batchId);offScrape=onWsEvent('scrape_progress',handleScrapeProgress)}catch(e){await alertDialog(e.message||'继续任务失败')}finally{taskAction.value=false}}
+async function retryItem(item){itemBusy.value=item.id;try{await api.adminRetryMetadataScrapeItem(task.value.batchId,item.id);offScrape=onWsEvent('scrape_progress',handleScrapeProgress)}catch(e){await alertDialog(e.message||'重试失败')}finally{itemBusy.value=null}}
 function setStatus(value){statusFilter.value=value;taskPage.value=0;refreshTask()}
 function changeTaskPage(value){taskPage.value=value;refreshTask()}
 async function openReview(item){reviewKeyword.value=[item.title,item.artist].filter(Boolean).join(' ');reviewing.value={...item,standalone:false};await loadReviewData(false)}
@@ -235,7 +245,7 @@ function formatPercent(value){const percent=Number(value||0)*100;return `${Numbe
 function formatTime(value){return value?new Date(value).toLocaleString('zh-CN',{hour12:false}):''}
 function fileName(path){return String(path||'').split(/[\\/]/).filter(Boolean).pop()||''}
 onMounted(initialize)
-onBeforeUnmount(()=>{if(timer)window.clearInterval(timer)})
+onBeforeUnmount(()=>{offScrape?.()})
 </script>
 
 <style scoped>

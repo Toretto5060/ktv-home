@@ -21,6 +21,32 @@ public record WsEvent(String type, Object payload) {
     public static final String EFFECT_PLAY = "effect_play";
     public static final String TOAST = "toast";
 
+    // 管理后台进度事件
+    public static final String SCAN_PROGRESS = "scan_progress";
+    public static final String SCRAPE_PROGRESS = "scrape_progress";
+    public static final String TRANSCODE_PROGRESS = "transcode_progress";
+    public static final String AI_TASK_PROGRESS = "ai_task_progress";
+    public static final String ARTIST_SCRAPE_PROGRESS = "artist_scrape_progress";
+
+    // 管理员通知事件
+    public static final String APPLICATION_APPROVED = "application_approved";
+    public static final String ROOM_DISABLED = "room_disabled";
+    public static final String ROOM_DISSOLVED = "room_dissolved";
+    public static final String ROOM_EXPIRED = "room_expired";
+    public static final String ROOM_PROMOTED = "room_promoted";
+    public static final String ROOM_NAME_CHANGED = "room_name_changed";
+    public static final String ROOM_TIME_CHANGED = "room_time_changed";
+    public static final String QR_CODE_REFRESHED = "qr_code_refreshed";
+    public static final String MEMBER_JOINED = "member_joined";
+    public static final String APPLICATION_EXPIRED = "application_expired";
+    public static final String DEVICE_BLACKLISTED = "device_blacklisted";
+    public static final String NEW_ROOM_APPLICATION = "new_room_application";
+    public static final String DEVICE_APPROVED = "device_approved";
+    public static final String DEVICE_PENDING = "device_pending";
+    public static final String DEVICE_ROOM_NOT_OPEN = "device_room_not_open";
+    public static final String DEVICE_IDLE = "device_idle";
+    public static final String ROOM_LIST_UPDATED = "room_list_updated";
+
     /**
      * 创建 WsEvent 实例的静态工厂方法。
      *

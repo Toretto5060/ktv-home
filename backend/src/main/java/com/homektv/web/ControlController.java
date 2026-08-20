@@ -48,8 +48,8 @@ public class ControlController {
      * @return 包含队列列表及播放器状态的快照对象 / snapshot containing the queue items and player state
      */
     @GetMapping("/queue")
-    public QueueSnapshot queue() {
-        return snapshotService.snapshot();
+    public QueueSnapshot queue(@RequestParam(required = false) String room_id) {
+        return snapshotService.snapshot(room_id);
     }
 
     /**
@@ -71,56 +71,56 @@ public class ControlController {
             case "order" -> {
                 queueService.order(req.longParam("song_id"), userId, req.boolParam("force"));
                 boolean started = playbackService.startIfIdle();
-                broadcast(WsEvent.QUEUE_UPDATED);
+                broadcast(req.roomId(), WsEvent.QUEUE_UPDATED);
                 if (started) {
-                    broadcast(WsEvent.NOW_PLAYING);
+                    broadcast(req.roomId(), WsEvent.NOW_PLAYING);
                 }
             }
             case "shuffle" -> {
                 queueService.shuffleWaiting();
-                broadcast(WsEvent.QUEUE_UPDATED);
+                broadcast(req.roomId(), WsEvent.QUEUE_UPDATED);
             }
             case "top" -> {
                 queueService.top(req.longParam("queue_id"));
-                broadcast(WsEvent.QUEUE_UPDATED);
+                broadcast(req.roomId(), WsEvent.QUEUE_UPDATED);
             }
             case "cancel" -> {
                 cancelWithPermission(req.longParam("queue_id"), userId);
-                broadcast(WsEvent.QUEUE_UPDATED);
+                broadcast(req.roomId(), WsEvent.QUEUE_UPDATED);
             }
             case "play", "pause" -> {
                 dispatchPlayback(action);
-                broadcast(WsEvent.PLAYER_STATE);
+                broadcast(req.roomId(), WsEvent.PLAYER_STATE);
             }
             case "restart" -> {
                 dispatchPlayback(action);
-                broadcast(WsEvent.PLAYBACK_RESTARTED);
+                broadcast(req.roomId(), WsEvent.PLAYBACK_RESTARTED);
             }
             case "next", "finished" -> {
                 dispatchPlayback(action);
-                broadcast(WsEvent.NOW_PLAYING);
+                broadcast(req.roomId(), WsEvent.NOW_PLAYING);
             }
             case "set_volume" -> {
                 playbackService.setVolume(req.intParam("volume", 60));
-                broadcast(WsEvent.VOLUME_CHANGED);
+                broadcast(req.roomId(), WsEvent.VOLUME_CHANGED);
             }
             case "mute" -> {
                 playbackService.setMuted(req.boolParam("muted"));
-                broadcast(WsEvent.VOLUME_CHANGED);
+                broadcast(req.roomId(), WsEvent.VOLUME_CHANGED);
             }
             case "set_vocal" -> {
                 playbackService.setVocalMode(req.strParam("mode"));
-                broadcast(WsEvent.VOCAL_CHANGED);
+                broadcast(req.roomId(), WsEvent.VOCAL_CHANGED);
             }
             case "swap_vocal_tracks" -> {
                 playbackService.swapVocalTracks();
-                broadcast(WsEvent.VOCAL_CHANGED);
+                broadcast(req.roomId(), WsEvent.VOCAL_CHANGED);
             }
-            case "effect" -> broadcaster.broadcast(
+            case "effect" -> broadcaster.broadcast(req.roomId(),
                     WsEvent.of(WsEvent.EFFECT_PLAY, java.util.Map.of("effect_id", req.strParam("effect_id"))));
             default -> throw new ApiException("INVALID_ACTION", "未知指令：" + action);
         }
-        return snapshotService.snapshot();
+        return snapshotService.snapshot(req.roomId());
     }
 
     private void dispatchPlayback(String action) {
@@ -137,8 +137,8 @@ public class ControlController {
      * 广播当前快照到所有端（详设§4.1：客户端以广播为准）。
      * Broadcasts the current snapshot to all clients (detailed design §4.1: clients rely on broadcasts).
      */
-    private void broadcast(String eventType) {
-        broadcaster.broadcast(WsEvent.of(eventType, snapshotService.snapshot()));
+    private void broadcast(String roomId, String eventType) {
+        broadcaster.broadcast(roomId, WsEvent.of(eventType, snapshotService.snapshot(roomId)));
     }
 
     /**

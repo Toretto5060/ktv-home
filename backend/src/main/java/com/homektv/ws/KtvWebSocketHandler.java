@@ -63,27 +63,37 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
      */
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
-        broadcaster.register(session);
+        RoomService.ConnectResult tvProbe = null;
 
-        // 黑名单立即拒绝（连接握手阶段，避免无效流量）
+        // TV 端的房间由 device_id 在服务端确定，不能依赖客户端猜测 room_id。
         if (isTv(session)) {
             Object deviceIdObj = session.getAttributes().get("device_id");
             String deviceId = deviceIdObj != null ? deviceIdObj.toString() : null;
             if (deviceId != null) {
-                RoomService.ConnectResult probe = roomService.connect(deviceId);
-                if ("blacklisted".equals(probe.status)) {
-                    broadcaster.sendTo(session, WsEvent.of("device_blacklisted", null));
+                tvProbe = roomService.connect(deviceId);
+                // 对所有非黑名单状态都设置 room_id（用于 broadcastToRoom 查找会话）
+                if (tvProbe.room != null) {
+                    session.getAttributes().put("room_id", tvProbe.room.getId().toString());
+                }
+                if ("blacklisted".equals(tvProbe.status)) {
                     session.close(CloseStatus.POLICY_VIOLATION);
                     log.info("TV设备 {} 在黑名单中，拒绝连接", deviceId);
                     return;
                 }
             }
-            // 任何非黑名单的 TV 连接都取消待执行的离线清空（保持原 approved 路径的语义）
+        }
+
+        broadcaster.register(session);
+
+        if (tvProbe != null) {
+            broadcaster.sendTo(session, tvProbe.toWsEvent());
             tvOfflineWatcher.onTvConnected();
         }
-        // 连接/重连即推全量快照（详设§4.1）
-        broadcaster.sendTo(session, WsEvent.of(WsEvent.SYNC_FULL, snapshotService.snapshot()));
-        log.debug("WS 连接建立: {}，当前在线 {}", session.getId(), broadcaster.sessionCount());
+
+        // 连接/重连只发送当前房间的快照。
+        String roomId = roomId(session);
+        broadcaster.sendTo(session, WsEvent.of(WsEvent.SYNC_FULL, snapshotService.snapshot(roomId)));
+        log.debug("WS 连接建立: {}，房间 {}，当前在线 {}", session.getId(), roomId, broadcaster.sessionCount());
     }
 
     /**
@@ -106,13 +116,13 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
             case "progress" -> {
                 // TV 上行播放进度 → 转发给所有端（详设§4.2 progress）
                 long positionMs = node.path("payload").path("position_ms").asLong(0);
-                broadcaster.broadcast(WsEvent.of(WsEvent.PROGRESS,
+                broadcaster.broadcast(roomId(session), WsEvent.of(WsEvent.PROGRESS,
                         java.util.Map.of("position_ms", positionMs)));
             }
             case "finished" -> {
                 // TV 上报当前曲目播放完成 → 推进队列并广播
                 playbackService.onFinished();
-                broadcaster.broadcast(WsEvent.of(WsEvent.NOW_PLAYING, snapshotService.snapshot()));
+                broadcaster.broadcast(roomId(session), WsEvent.of(WsEvent.NOW_PLAYING, snapshotService.snapshot(roomId(session))));
             }
             case "play_error" -> {
                 // TV 无法读取当前媒体时按异常切歌，避免队列卡死；将原因同步给手机端。
@@ -120,9 +130,9 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
                 Long fileId = node.path("payload").path("file_id").isNumber()
                         ? node.path("payload").path("file_id").asLong() : null;
                 playbackService.onPlayError(fileId);
-                broadcaster.broadcast(WsEvent.of(WsEvent.TOAST,
+                broadcaster.broadcast(roomId(session), WsEvent.of(WsEvent.TOAST,
                         java.util.Map.of("text", "当前歌曲播放失败，已自动切换下一首：" + reason)));
-                broadcaster.broadcast(WsEvent.of(WsEvent.NOW_PLAYING, snapshotService.snapshot()));
+                broadcaster.broadcast(roomId(session), WsEvent.of(WsEvent.NOW_PLAYING, snapshotService.snapshot(roomId(session))));
             }
             default -> log.debug("未知 WS 消息类型: {}", type);
         }
@@ -161,6 +171,11 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
     private boolean isTv(WebSocketSession session) {
         Object type = session.getAttributes().get("client_type");
         return "tv".equals(type == null ? null : type.toString());
+    }
+
+    private String roomId(WebSocketSession session) {
+        Object room = session.getAttributes().get("room_id");
+        return room == null ? null : room.toString();
     }
 
     private void notifyOfflineIfTv(String clientType) {

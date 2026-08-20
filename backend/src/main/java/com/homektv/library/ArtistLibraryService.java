@@ -8,6 +8,8 @@ import com.homektv.musicsource.MusicSourceConfigService;
 import com.homektv.repo.ArtistMetadataRepository;
 import com.homektv.repo.SongRepository;
 import com.homektv.web.ApiException;
+import com.homektv.ws.ProgressBroadcaster;
+import com.homektv.ws.WsEvent;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,16 +32,19 @@ public class ArtistLibraryService {
     private final SongRepository songRepo;
     private final ArtistScraperService scraper;
     private final MusicSourceConfigService configService;
+    private final ProgressBroadcaster progressBroadcaster;
 
     /** 后台刮削任务状态。null = 无任务。 */
     private final AtomicReference<ScrapeAllTask> backgroundTask = new AtomicReference<>();
 
     public ArtistLibraryService(ArtistMetadataRepository metaRepo, SongRepository songRepo,
-                                ArtistScraperService scraper, MusicSourceConfigService configService) {
+                                ArtistScraperService scraper, MusicSourceConfigService configService,
+                                ProgressBroadcaster progressBroadcaster) {
         this.metaRepo = metaRepo;
         this.songRepo = songRepo;
         this.scraper = scraper;
         this.configService = configService;
+        this.progressBroadcaster = progressBroadcaster;
     }
 
     /** 启动后台刮削：扫描所有无头像歌手，在后台异步执行。 */
@@ -319,7 +324,7 @@ public class ArtistLibraryService {
     // ---- 后台刮削任务 ----
 
     /** 后台全量刮削任务状态。 */
-    private static class ScrapeAllTask {
+    private class ScrapeAllTask {
         private volatile boolean running = false;
         private volatile boolean paused = false;
         private volatile int total = 0;
@@ -329,8 +334,12 @@ public class ArtistLibraryService {
 
         synchronized void start() { this.running = true; this.paused = false; this.phase = "SCANNING"; }
         synchronized void setTotal(int n) { this.total = n; this.phase = "SCRAPING"; }
-        synchronized void markDone(boolean ok) { this.done++; if (ok) this.succeeded++; }
-        synchronized void finish() { this.running = false; this.paused = false; this.phase = "DONE"; }
+        synchronized void markDone(boolean ok) {
+            this.done++;
+            if (ok) this.succeeded++;
+            broadcastArtistScrapeProgress();
+        }
+        synchronized void finish() { this.running = false; this.paused = false; this.phase = "DONE"; broadcastArtistScrapeProgress(); }
         synchronized boolean isRunning() { return this.running; }
         synchronized boolean isPaused() { return this.paused; }
         synchronized void pause() { this.paused = true; this.phase = "PAUSED"; }
@@ -352,6 +361,14 @@ public class ArtistLibraryService {
                     "done", done,
                     "succeeded", succeeded
             );
+        }
+    }
+
+    private void broadcastArtistScrapeProgress() {
+        if (progressBroadcaster == null) return;
+        ScrapeAllTask task = backgroundTask.get();
+        if (task != null) {
+            progressBroadcaster.broadcastToH5(WsEvent.ARTIST_SCRAPE_PROGRESS, task.status());
         }
     }
 

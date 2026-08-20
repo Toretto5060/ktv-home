@@ -29,33 +29,36 @@
 /**
  * 入口页面 — 用户输入昵称后进入点歌系统。
  * 支持随机昵称生成、本地记忆和昵称冲突自动去重。
- * 也支持扫描二维码后直接进入房间（携带 ?qr=xxx 参数）。
+ * 也支持扫描二维码后直接进入房间（携带 ?room=xxx 或 ?qr=xxx 参数）。
  *
  * Entry page — user enters a nickname and proceeds to the song-request system.
  * Supports random nickname generation, local memory, and automatic dedup on nickname conflict.
- * Also supports direct entry via scanning a QR code (carries ?qr=xxx parameter).
+ * Also supports direct entry via scanning a QR code (carries ?room=xxx or ?qr=xxx parameter).
  */
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { usePlayerStore } from '../stores/player'
+import { useQrGuardStore } from '../stores/qrGuard'
 import api from '../api/client'
 
 const router = useRouter()
 const route = useRoute()
 const user = useUserStore()
 const player = usePlayerStore()
+const qrGuard = useQrGuardStore()
 
 const nickname = ref(user.suggestNickname())
 const roomName = ref('')
 const scanStatus = ref(null)
 const scannedQrCode = ref('')
+const joinedRoomId = ref('')
 
 // 默认回填已存昵称或随机建议值（详设 H5-01）
 // Default: fallback to saved nickname or a random suggestion (spec H5-01)
 onMounted(async () => {
-  // 检查是否通过扫码进入（URL中带 ?qr=xxx）
-  const qrFromUrl = route.query.qr
+  // 兼容两种参数名：?room=xxx（TV APK 生成的加密 token）和 ?qr=xxx（旧兼容）
+  const qrFromUrl = route.query.room ?? route.query.qr
   if (qrFromUrl) {
     scannedQrCode.value = qrFromUrl
     // 如果已经注册过，直接尝试加入房间
@@ -67,7 +70,12 @@ onMounted(async () => {
 })
 
 /**
- * 尝试通过二维码加入房间
+ * 尝试通过二维码加入房间。
+ * 失败时不再允许用户继续点歌——调用 qrGuard.markInvalid 进入全屏蒙版状态。
+ *
+ * Try to join a room via QR code.
+ * On failure the user is no longer allowed to proceed—qrGuard.markInvalid
+ * flips the app into the non-dismissible overlay state.
  */
 async function tryJoinRoom() {
   if (!scannedQrCode.value) return
@@ -77,16 +85,30 @@ async function tryJoinRoom() {
     const result = await api.roomJoin(scannedQrCode.value, deviceId, nickname.value)
     if (result.success) {
       roomName.value = result.room_name
+      joinedRoomId.value = result.room_id || ''
+      user.setJoinedRoom(scannedQrCode.value, joinedRoomId.value)
       scanStatus.value = {
         type: 'success',
         message: `已加入房间"${result.room_name}"${result.is_new_member ? '' : '（您已在房间中）'}`
       }
     } else {
-      scanStatus.value = { type: 'error', message: result.message || '加入失败' }
+      const msg = result.message || '二维码无效或已过期'
+      scanStatus.value = { type: 'error', message: msg }
       scannedQrCode.value = ''
+      user.clearJoinedRoom()
+      qrGuard.markInvalid(msg)
     }
   } catch (e) {
-    scanStatus.value = { type: 'error', message: e.message || '加入失败，请检查网络' }
+    const msg = e.message || '加入失败，请检查网络'
+    if (e?.status === 403 || (e?.message && e.message.includes('二维码'))) {
+      // 失效：触发路由层不可关闭蒙版
+      // Invalid: trigger router-layer non-dismissible overlay
+      scannedQrCode.value = ''
+      user.clearJoinedRoom()
+      qrGuard.markInvalid(msg)
+      return
+    }
+    scanStatus.value = { type: 'error', message: msg }
     scannedQrCode.value = ''
   }
 }
@@ -108,6 +130,12 @@ function getDeviceId() {
  * Handles the "Enter" button: registers the nickname and navigates to home.
  * Registers locally first, then syncs to server to resolve nickname conflicts (P2.13).
  * After registration, establishes the WebSocket connection and routes to home.
+ *
+ * 若用户是从扫码进入的：必须先成功加入房间才能进入点歌；
+ * QR 失效时由 qrGuard 拦截，并跳转到 /invalid 显示不可关闭蒙版。
+ *
+ * If the user arrived via QR scan: must successfully join the room before entering
+ * the song-request UI; QR invalidation is enforced by qrGuard → /invalid overlay.
  */
 async function enter() {
   user.register(nickname.value)
@@ -121,6 +149,11 @@ async function enter() {
   // 如果是扫码进入，先尝试加入房间
   if (scannedQrCode.value) {
     await tryJoinRoom()
+    if (qrGuard.invalid) {
+      // QR 已失效：路由守卫会接管跳转 /invalid，无需手动操作
+      // QR invalidated: router guard will redirect to /invalid automatically
+      return
+    }
   }
 
   player.connect()

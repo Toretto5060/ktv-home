@@ -46,8 +46,10 @@ class KtvSocket(
         fun onDeviceApproved(roomName: String, qrCode: String?, activeStart: String?, activeEnd: String?) {}
         fun onDevicePending(expiredAt: String?) {}
         fun onDeviceBlacklisted() {}
+        fun onDeviceIdle() {}
         fun onRoomNotOpen() {}
         fun onRoomDisabled() {}
+        fun onRoomDissolved() {}
         fun onRoomNameChanged(name: String) {}
         fun onRoomTimeChanged(activeStart: String?, activeEnd: String?, qrCode: String?) {}
         fun onQrCodeRefreshed(qrCode: String) {}
@@ -141,7 +143,7 @@ class KtvSocket(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.w(TAG, "ws failure: ${t.message}")
+            Log.w(TAG, "ws failure: ${t.message} response=$response")
             main.post {
                 main.removeCallbacks(heartbeat)
                 listener.onConnectionChanged(false)
@@ -155,6 +157,7 @@ class KtvSocket(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            Log.d(TAG, "ws closed: code=$code reason=$reason")
             main.post {
                 main.removeCallbacks(heartbeat)
                 listener.onConnectionChanged(false)
@@ -198,8 +201,11 @@ class KtvSocket(
                 listener.onDevicePending(expiredAt)
             }
             "device_blacklisted" -> listener.onDeviceBlacklisted()
-            "room_not_open" -> listener.onRoomNotOpen()
+            "device_idle" -> listener.onDeviceIdle()
+            "device_room_not_open" -> listener.onRoomNotOpen()
             "room_disabled" -> listener.onRoomDisabled()
+            "room_dissolved" -> listener.onRoomDissolved()
+            "room_expired" -> listener.onRoomDisabled()
             "room_name_changed" -> {
                 val name = (payload as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNullSafe() ?: ""
                 listener.onRoomNameChanged(name)

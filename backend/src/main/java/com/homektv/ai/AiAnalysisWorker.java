@@ -8,9 +8,12 @@ import com.homektv.domain.MediaImportRecord;
 import com.homektv.repo.AiAnalysisTaskRepository;
 import com.homektv.repo.MediaImportRecordRepository;
 import com.homektv.repo.SongRepository;
+import com.homektv.ws.ProgressBroadcaster;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import com.homektv.web.ApiException;
+
+import java.util.Map;
 
 /**
  * AI 分析任务工作器，异步执行歌曲 AI 分类分析。
@@ -29,12 +32,14 @@ public class AiAnalysisWorker {
     private final AiConcurrencyLimiter concurrencyLimiter;
     private final MediaImportRecordRepository importRecordRepository;
     private final LocalClassificationService localClassificationService;
+    private final ProgressBroadcaster progressBroadcaster;
 
     public AiAnalysisWorker(AiAnalysisTaskRepository taskRepository, SongRepository songRepository,
                             OpenAiCompatibleClient aiClient, ObjectMapper objectMapper, AiConfigService configService,
                             AiAutoApplyPolicy autoApplyPolicy, AiClassificationApplier classificationApplier,
                             AiConcurrencyLimiter concurrencyLimiter, MediaImportRecordRepository importRecordRepository,
-                            LocalClassificationService localClassificationService) {
+                            LocalClassificationService localClassificationService,
+                            ProgressBroadcaster progressBroadcaster) {
         this.taskRepository = taskRepository;
         this.songRepository = songRepository;
         this.aiClient = aiClient;
@@ -45,6 +50,7 @@ public class AiAnalysisWorker {
         this.concurrencyLimiter = concurrencyLimiter;
         this.importRecordRepository = importRecordRepository;
         this.localClassificationService = localClassificationService;
+        this.progressBroadcaster = progressBroadcaster;
     }
 
     /**
@@ -137,6 +143,14 @@ public class AiAnalysisWorker {
         }
         if (isPaused(taskId)) return;
         taskRepository.save(task);
+        if (progressBroadcaster != null) {
+            progressBroadcaster.broadcastAiProgress(Map.of(
+                    "taskId", taskId,
+                    "batchId", task.getBatchId() == null ? "" : task.getBatchId(),
+                    "status", task.getStatus(),
+                    "songId", task.getSongId()
+            ));
+        }
     }
 
     private boolean isPaused(Long taskId) {

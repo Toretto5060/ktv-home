@@ -8,6 +8,8 @@ import { defineStore } from 'pinia'
 // localStorage 存储键名 / localStorage storage keys
 const TOKEN_KEY = 'ktv_client_token'
 const NICK_KEY = 'ktv_nickname'
+const ROOM_KEY = 'ktv_joined_room_token'
+const ROOM_ID_KEY = 'ktv_room_id'
 
 /**
  * 生成客户端唯一标识 token：优先使用原生 crypto.randomUUID()，不可用时降级为随机字符串。
@@ -44,12 +46,21 @@ export const useUserStore = defineStore('user', {
     // 客户端唯一标识 / client unique token
     clientToken: localStorage.getItem(TOKEN_KEY) || '',
     // 用户昵称 / user nickname
-    nickname: localStorage.getItem(NICK_KEY) || ''
+    nickname: localStorage.getItem(NICK_KEY) || '',
+    // 本机最近一次成功加入房间的 QR token；为空表示尚未扫码或已失效
+    // Last successfully joined room QR token on this device; empty means never scanned or invalidated
+    joinedRoomToken: localStorage.getItem(ROOM_KEY) || '',
+    // 服务端从 QR token 解码出的真实房间 ID
+    // The canonical room ID decoded by the server from the QR token
+    roomId: localStorage.getItem(ROOM_ID_KEY) || ''
   }),
   getters: {
     // 是否已完成初次进入（有 token 且有昵称）
     // Whether the user has completed initial registration (has both token and nickname)
-    isRegistered: (s) => !!s.clientToken && !!s.nickname
+    isRegistered: (s) => !!s.clientToken && !!s.nickname,
+    // 是否已通过有效二维码加入房间（用于路由守卫判断）
+    // Whether the user has joined a room via a valid QR (used by router guard)
+    hasValidRoom: (s) => !!s.joinedRoomToken && !!s.roomId
   },
   actions: {
     /**
@@ -100,6 +111,34 @@ export const useUserStore = defineStore('user', {
       if (!nickname) return
       this.nickname = nickname
       localStorage.setItem(NICK_KEY, nickname)
+    },
+
+    /**
+     * 记录本次成功扫码加入的房间 QR token。
+     *
+     * Record the QR token of the room the user has successfully joined.
+     * @param {string} token - 二维码原始 token / raw QR token
+     */
+    setJoinedRoom(token, roomId = '') {
+      if (!token) return
+      this.joinedRoomToken = token
+      localStorage.setItem(ROOM_KEY, token)
+      if (roomId) {
+        this.roomId = roomId
+        localStorage.setItem(ROOM_ID_KEY, roomId)
+      }
+    },
+
+    /**
+     * 清除已绑定的房间（QR 失效或用户主动离开时）。
+     *
+     * Clear the bound room (called when QR is invalidated or user leaves).
+     */
+    clearJoinedRoom() {
+      this.joinedRoomToken = ''
+      this.roomId = ''
+      localStorage.removeItem(ROOM_KEY)
+      localStorage.removeItem(ROOM_ID_KEY)
     }
   }
 })

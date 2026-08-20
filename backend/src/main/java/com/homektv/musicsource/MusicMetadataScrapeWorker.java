@@ -1,6 +1,7 @@
 package com.homektv.musicsource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.homektv.ws.ProgressBroadcaster;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -35,15 +36,17 @@ public class MusicMetadataScrapeWorker {
     private final MusicMetadataApplyService applyService;
     private final MusicSourceConfigService configService;
     private final ObjectMapper mapper;
+    private final ProgressBroadcaster progressBroadcaster;
 
     public MusicMetadataScrapeWorker(JdbcTemplate jdbc, MusicSourceSearchService searchService,
                                      MusicMetadataApplyService applyService, MusicSourceConfigService configService,
-                                     ObjectMapper mapper) {
+                                     ObjectMapper mapper, ProgressBroadcaster progressBroadcaster) {
         this.jdbc = jdbc;
         this.searchService = searchService;
         this.applyService = applyService;
         this.configService = configService;
         this.mapper = mapper;
+        this.progressBroadcaster = progressBroadcaster;
     }
 
     @Async("metadataScrapeExecutor")
@@ -174,6 +177,41 @@ public class MusicMetadataScrapeWorker {
                     WHERE id=? AND status='RUNNING'
                     """, batchId);
         }
+        broadcastProgress(batchId);
+    }
+
+    private void broadcastProgress(String batchId) {
+        if (progressBroadcaster == null) return;
+        try {
+            var batch = jdbc.queryForObject("""
+                    SELECT id,mode,status,auto_apply_threshold,skipped_existing,created_at,started_at,finished_at
+                    FROM music_metadata_scrape_batches WHERE id=?
+                    """, (rs, i) -> {
+                var m = new java.util.LinkedHashMap<String, Object>();
+                m.put("id", rs.getString("id"));
+                m.put("mode", rs.getString("mode"));
+                m.put("status", rs.getString("status"));
+                m.put("skippedExisting", rs.getInt("skipped_existing"));
+                m.put("startedAt", rs.getTimestamp("started_at"));
+                m.put("finishedAt", rs.getTimestamp("finished_at"));
+                return m;
+            }, batchId);
+            if (batch == null) return;
+            var countEntries = jdbc.query("""
+                    SELECT status, COUNT(*) AS cnt FROM music_metadata_scrape_items WHERE batch_id=? GROUP BY status
+                    """, (rs, i) -> java.util.Map.entry(rs.getString(1), rs.getLong(2)), batchId);
+            long total = 0, completed = 0;
+            for (var e : countEntries) {
+                total += e.getValue();
+                if (Set.of("AUTO_APPLIED", "REVIEW", "MANUAL_APPLIED", "FAILED").contains(e.getKey())) {
+                    completed += e.getValue();
+                }
+            }
+            batch.put("total", total);
+            batch.put("completed", completed);
+            batch.put("exists", true);
+            progressBroadcaster.broadcastScrapeProgress(batch);
+        } catch (Exception ignored) { }
     }
 
     private static String safe(Throwable ex) {

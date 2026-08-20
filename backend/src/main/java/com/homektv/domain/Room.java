@@ -15,7 +15,7 @@ public class Room {
     @Column(name = "device_id", nullable = false, unique = true)
     private String deviceId;
 
-    @Column(nullable = false)
+    @Column(nullable = true)
     private String name;
 
     @Enumerated(EnumType.STRING)
@@ -30,6 +30,9 @@ public class Room {
 
     @Column(name = "qr_code")
     private String qrCode;
+
+    @Column(name = "qr_code_version", nullable = false)
+    private Long qrCodeVersion = 1L;
 
     @Column(name = "qr_expire_at")
     private LocalDateTime qrExpireAt;
@@ -55,7 +58,7 @@ public class Room {
         PENDING,
         APPROVED,
         REJECTED,
-        DISABLED
+        IDLE
     }
 
     public UUID getId() { return id; }
@@ -79,8 +82,13 @@ public class Room {
     public String getQrCode() { return qrCode; }
     public void setQrCode(String qrCode) { this.qrCode = qrCode; }
 
+    public Long getQrCodeVersion() { return qrCodeVersion; }
+    public void setQrCodeVersion(Long qrCodeVersion) { this.qrCodeVersion = qrCodeVersion; }
+
     public LocalDateTime getQrExpireAt() { return qrExpireAt; }
     public void setQrExpireAt(LocalDateTime qrExpireAt) { this.qrExpireAt = qrExpireAt; }
+
+    public boolean isIdle() { return status == RoomStatus.IDLE; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

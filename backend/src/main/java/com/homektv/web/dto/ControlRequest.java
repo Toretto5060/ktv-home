@@ -14,8 +14,13 @@ import java.util.Map;
 public record ControlRequest(
         String action,
         Map<String, Object> params,
-        @JsonProperty("client_token") String clientToken
+        @JsonProperty("client_token") String clientToken,
+        @JsonProperty("room_id") String roomId
 ) {
+    public ControlRequest(String action, Map<String, Object> params, String clientToken) {
+        this(action, params, clientToken, null);
+    }
+
     /**
      * 安全获取参数映射，避免空指针。
      *

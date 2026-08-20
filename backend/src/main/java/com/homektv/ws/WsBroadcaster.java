@@ -47,12 +47,15 @@ public class WsBroadcaster {
     private static class SessionInfo {
         final String sessionId;
         final WebSocketSession session;
+        final String roomId;
         volatile long lastMessageTime;
         volatile boolean pendingRemoval = false;
 
         SessionInfo(String sessionId, WebSocketSession session) {
             this.sessionId = sessionId;
             this.session = session;
+            Object room = session.getAttributes().get("room_id");
+            this.roomId = room == null ? null : room.toString();
             this.lastMessageTime = System.currentTimeMillis();
         }
     }
@@ -142,9 +145,14 @@ public class WsBroadcaster {
      * TV 是否在线。
      */
     public boolean isTvOnline() {
+        return isTvOnline(null);
+    }
+
+    public boolean isTvOnline(String roomId) {
         return sessions.values().stream().anyMatch(info -> {
             Object type = info.session.getAttributes().get("client_type");
-            return "tv".equals(type == null ? null : type.toString());
+            return "tv".equals(type == null ? null : type.toString())
+                    && (roomId == null || roomId.equals(info.roomId));
         });
     }
 
@@ -152,9 +160,17 @@ public class WsBroadcaster {
      * 已连接的 H5 手机数（去重，同一 client_token 只算一次）。
      */
     public long h5Count() {
+        return h5Count(null);
+    }
+
+    /**
+     * 统计指定房间的 H5 连接数；同一 client_token 已在 register 中去重。
+     */
+    public long h5Count(String roomId) {
         return sessions.values().stream().filter(info -> {
             Object type = info.session.getAttributes().get("client_type");
-            return "h5".equals(type == null ? null : type.toString());
+            return "h5".equals(type == null ? null : type.toString())
+                    && (roomId == null || roomId.equals(info.roomId));
         }).count();
     }
 
@@ -196,20 +212,27 @@ public class WsBroadcaster {
     }
 
     /**
-     * 向指定设备 ID 的会话发送事件。
+     * 向指定房间 ID 的 TV 会话发送事件（用于审批/拒绝等主动通知）。
+     * 使用 room_id 而非 device_id 查找会话（因为 TV 在 PENDING 状态下 room_id 已正确设置）。
      *
-     * @param deviceId 目标设备 ID
+     * @param roomId 目标房间 ID
      * @param event 要发送的事件
      */
-    public void broadcastToDevice(String deviceId, WsEvent event) {
+    public void broadcastToRoom(String roomId, WsEvent event) {
         String json = serialize(event);
+        log.info("broadcastToRoom: 查找房间 {}，当前会话数 {}", roomId, sessions.size());
         for (SessionInfo info : sessions.values()) {
-            Object did = info.session.getAttributes().get("device_id");
-            if (deviceId.equals(did)) {
+            Object rid = info.session.getAttributes().get("room_id");
+            log.info("  会话 {} 的 room_id: {}", info.sessionId, rid);
+            if (rid != null && roomId.equals(rid.toString())) {
+                Object clientType = info.session.getAttributes().get("client_type");
+                if (!"tv".equals(clientType == null ? null : clientType.toString())) continue;
+                log.info("  找到目标 TV 会话 {}，发送事件 {}", info.sessionId, event.type());
                 send(info.session, json);
                 return;
             }
         }
+        log.warn("未找到房间 {} 的 TV 会话", roomId);
     }
 
     /**
@@ -223,9 +246,17 @@ public class WsBroadcaster {
      * 向所有在线会话广播事件。
      */
     public void broadcast(WsEvent event) {
+        broadcast(null, event);
+    }
+
+    /** 向指定房间广播事件；roomId 为空时保留全局广播兼容行为。 */
+    public void broadcast(String roomId, WsEvent event) {
         String json = serialize(event);
+        log.info("广播事件 {}，房间 {}，当前在线会话数: {}", event.type(), roomId, sessions.size());
         for (SessionInfo info : sessions.values()) {
-            send(info.session, json);
+            if (roomId == null || roomId.equals(info.roomId)) {
+                send(info.session, json);
+            }
         }
     }
 

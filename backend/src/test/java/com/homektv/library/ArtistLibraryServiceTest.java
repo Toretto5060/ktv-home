@@ -6,6 +6,7 @@ import com.homektv.musicsource.MusicSourceConfig;
 import com.homektv.musicsource.MusicSourceConfigService;
 import com.homektv.repo.ArtistMetadataRepository;
 import com.homektv.repo.SongRepository;
+import com.homektv.ws.ProgressBroadcaster;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -32,7 +33,8 @@ class ArtistLibraryServiceTest {
         configService = mock(MusicSourceConfigService.class);
         MusicSourceConfig config = new MusicSourceConfig(true, Set.of(), 20, 5, 6, 1, 0, 0.95);
         when(configService.getConfig()).thenReturn(config);
-        service = new ArtistLibraryService(metaRepo, songRepo, scraper, configService);
+        service = new ArtistLibraryService(metaRepo, songRepo, scraper, configService,
+                mock(ProgressBroadcaster.class));
     }
 
     @Test

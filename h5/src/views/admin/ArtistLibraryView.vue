@@ -131,12 +131,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ChevronDown, Download, Pause, Play, RefreshCw, UsersRound } from 'lucide-vue-next'
 import api from '../../api/client'
 import AdminLayout from './AdminLayout.vue'
 import { alertDialog } from '../../composables/useDialog'
+import { onWsEvent } from '../../composables/useWsBus'
 
 const router = useRouter()
 const artists = ref([]), loading = ref(false), page = ref(0), totalPages = ref(1)
@@ -150,7 +151,7 @@ const syncing = ref(false)
 const scrapeBgRunning = ref(false)
 const scrapeBgPaused = ref(false)
 const scrapeBgProgress = ref({})
-let scrapeBgTimer = null
+let offArtistScrape = null
 
 const hasAvatarCount = computed(() => stats.value.hasAvatar)
 const noAvatarCount = computed(() => stats.value.noAvatar)
@@ -158,13 +159,13 @@ const noAvatarCount = computed(() => stats.value.noAvatar)
 onMounted(async () => {
   loadStats()
   load()
-  // 页面刷新后，检查后端任务是否还在跑，如果是则恢复轮询
+  // 检查后端任务是否还在跑，如果是则订阅 WS
   try {
     const s = await api.adminScrapeAllStatus()
     if (s.running) {
       scrapeBgRunning.value = true
       scrapeBgProgress.value = s
-      scrapeBgTimer = setInterval(pollScrapeStatus, 2000)
+      offArtistScrape = onWsEvent('artist_scrape_progress', handleArtistScrapeProgress)
     }
   } catch {}
 })
@@ -224,34 +225,31 @@ async function startBackgroundScrape() {
     await api.adminScrapeAllArtists()
     scrapeBgRunning.value = true
     scrapeBgProgress.value = { phase: 'SCANNING', done: 0, succeeded: 0 }
-    scrapeBgTimer = setInterval(pollScrapeStatus, 2000)
+    offArtistScrape = onWsEvent('artist_scrape_progress', handleArtistScrapeProgress)
   } catch (e) { await alertDialog(e.message || '启动刮削失败') }
 }
 
-async function pollScrapeStatus() {
-  try {
-    const s = await api.adminScrapeAllStatus()
-    scrapeBgProgress.value = s
-    scrapeBgPaused.value = s.paused === true
-    if (!s.running) {
-      clearInterval(scrapeBgTimer)
-      scrapeBgTimer = null
-      scrapeBgRunning.value = false
-      scrapeBgPaused.value = false
-      await loadStats()
-      await load()
-      const msg = s.succeeded > 0 ? `刮削完成：成功 ${s.succeeded} / ${s.done} 位` : `刮削完成：共处理 ${s.done} 位`
-      await alertDialog(msg)
-    } else {
-      await loadStats()
-    }
-  } catch {
-    clearInterval(scrapeBgTimer)
-    scrapeBgTimer = null
+async function handleArtistScrapeProgress(payload) {
+  scrapeBgProgress.value = payload
+  scrapeBgPaused.value = payload.paused === true
+  if (!payload.running) {
     scrapeBgRunning.value = false
     scrapeBgPaused.value = false
+    offArtistScrape?.(); offArtistScrape = null
+    await loadStats()
+    await load()
+    const msg = payload.succeeded > 0 ? `刮削完成：成功 ${payload.succeeded} / ${payload.done} 位` : `刮削完成：共处理 ${payload.done} 位`
+    await alertDialog(msg)
+  } else {
+    await loadStats()
   }
 }
+
+/**
+ * 轮询刮削进度，已废弃，保留兼容。
+ * Poll scrape status — deprecated, kept for compatibility.
+ */
+async function pollScrapeStatus() {}
 
 async function pauseBackgroundScrape() {
   try {
@@ -267,7 +265,7 @@ async function resumeBackgroundScrape() {
   } catch (e) { await alertDialog(e.message || '继续失败') }
 }
 
-onUnmounted(() => { if (scrapeBgTimer) clearInterval(scrapeBgTimer) })
+onBeforeUnmount(() => { offArtistScrape?.() })
 
 async function syncArtists() {
   syncing.value = true

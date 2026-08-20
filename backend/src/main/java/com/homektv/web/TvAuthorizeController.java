@@ -62,6 +62,12 @@ public class TvAuthorizeController {
                 Room room = result.room;
                 body.put("room_id", room.getId().toString());
                 body.put("name", room.getName());
+                // 让 TV 端启动时就能拿到当前 qr_code，不需要等 WS 的 device_approved 事件
+                body.put("qr_code", room.getQrCode() != null ? room.getQrCode() : "");
+                body.put("qr_code_version", room.getQrCodeVersion() != null ? room.getQrCodeVersion() : 1L);
+            }
+            case "idle" -> {
+                // 空闲房间，等待管理员开启
             }
             case "blacklisted", "room_not_open" -> {
                 // 仅返回 status，调用方按需处理
