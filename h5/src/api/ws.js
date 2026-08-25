@@ -67,12 +67,10 @@ export class KtvSocket {
    */
   connect() {
     this.closed = false
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    // 开发环境由 Vite 代理 /ws 请求；生产环境同源直连
-    // Dev: Vite proxies /ws requests; production: same-origin direct connection
-    const params = new URLSearchParams({ client_type: 'h5' })
-    if (this.roomId) params.set('room_id', this.roomId)
-    const url = `${proto}://${location.host}/ws?${params.toString()}`
+    // 使用相对路径避免端口不匹配问题
+    // 开发环境：Vite 代理 /ws 到 :8080
+    // 生产环境：Spring Boot 直接托管，相对路径即 /ws
+    const url = `/ws?client_type=h5${this.roomId ? '&room_id=' + encodeURIComponent(this.roomId) : ''}`
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
@@ -84,6 +82,7 @@ export class KtvSocket {
       let msg
       try { msg = JSON.parse(e.data) } catch { return }
       if (msg.type === 'pong') return
+      console.log('[KtvSocket] 收到事件:', msg.type, msg.payload)
       this.onEvent(msg.type, msg.payload)
     }
     this.ws.onclose = () => {

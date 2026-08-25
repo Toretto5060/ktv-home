@@ -1,5 +1,6 @@
 package com.homektv.domain;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -60,5 +61,15 @@ public class RoomApplication {
 
     public boolean isExpired() {
         return LocalDateTime.now().isAfter(expiredAt);
+    }
+
+    /**
+     * 返回剩余秒数（计算属性，不持久化到数据库）。
+     * 前端直接使用此值显示倒计时，避免时区问题。
+     */
+    @JsonIgnore
+    public long getExpiredInSeconds() {
+        if (expiredAt == null) return 0;
+        return Math.max(0, java.time.Duration.between(LocalDateTime.now(), expiredAt).getSeconds());
     }
 }

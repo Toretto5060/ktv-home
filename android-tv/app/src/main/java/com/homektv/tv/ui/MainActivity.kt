@@ -26,7 +26,6 @@ import android.view.Gravity
 import android.view.ViewGroup
 import androidx.annotation.OptIn
 import java.text.SimpleDateFormat
-import java.time.OffsetDateTime
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -94,8 +93,8 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
     private var deviceIdleReceived = false
     /** 待机页数据是否已加载（授权通过后只加载一次，避免重复请求）。 */
     private var standbyLoaded = false
-    /** pending 审批截止时间戳（毫秒），null 表示无倒计时。 */
-    private var pendingExpiredAtMs: Long? = null
+    /** pending 审批剩余秒数，直接递减，null 表示无倒计时。 */
+    private var pendingRemainingSec: Long? = null
     /** pending 倒计时刷新定时器。 */
     private val pendingCountdownTick = object : Runnable {
         override fun run() {
@@ -759,6 +758,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                     "approved" -> {
                         authorizeCompleted = true
                         binding.root.removeCallbacks(authorizeRetryRunnable)
+                        clearStandbyData()
                         hideRoomStatusOverlay()
                         applyRoomName(result.roomName)
                         // HTTP 授权响应中直接带 qr_code，避免等 WS 的 device_approved 事件
@@ -772,7 +772,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                             R.string.room_status_pending,
                             R.string.room_status_pending_hint,
                             true,
-                            parseIsoToMs(result.expiredAt),
+                            result.expiredAt,
                         )
                     }
                     "blacklisted" -> {
@@ -829,13 +829,14 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         if (!::binding.isInitialized) return
         if (binding.validatingOverlay.visibility != View.VISIBLE) return
         binding.root.removeCallbacks(pendingCountdownTick)
-        pendingExpiredAtMs = null
+        pendingRemainingSec = null
         binding.validatingOverlay.tag = null
         binding.validatingOverlay.visibility = View.GONE
         binding.txtOverlayTitle.text = "正在连接..."
     }
 
     override fun onDeviceApproved(roomName: String, qrCode: String?, activeStart: String?, activeEnd: String?) {
+        Log.d(TAG, "onDeviceApproved: roomName=$roomName qrCode=${qrCode != null}")
         // 名称为空或 blank → 显示默认标题 HOME KTV
         val displayName = roomName?.takeIf { it.isNotBlank() } ?: getString(R.string.default_room_name)
         currentRoomName = displayName
@@ -845,17 +846,18 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             authorizeCompleted = true
             binding.root.removeCallbacks(authorizeRetryRunnable)
             binding.root.removeCallbacks(pendingCountdownTick)
-            pendingExpiredAtMs = null
+            pendingRemainingSec = null
             binding.validatingOverlay.visibility = View.GONE
             binding.txtOverlayTitle.text = "正在连接..."
             binding.txtBrandName.text = displayName
+            clearStandbyData()
             showStandby()
             loadQr()
             if (!standbyLoaded) loadStandbyDataIfApproved()
         }
     }
 
-    override fun onDevicePending(expiredAt: String?) {
+    override fun onDevicePending(expiredAtMs: Long?) {
         runOnUiThread {
             authorizeCompleted = true
             binding.root.removeCallbacks(authorizeRetryRunnable)
@@ -864,7 +866,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                 R.string.room_status_pending,
                 R.string.room_status_pending_hint,
                 true,
-                parseIsoToMs(expiredAt),
+                expiredAtMs,
             )
         }
     }
@@ -876,7 +878,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             if (blacklistNotified) return@runOnUiThread
             blacklistNotified = true
             binding.root.removeCallbacks(pendingCountdownTick)
-            pendingExpiredAtMs = null
+            pendingRemainingSec = null
             currentQrCode = null
             authorizeCompleted = false
             standbyLoaded = false
@@ -905,12 +907,13 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         runOnUiThread {
             if (blacklistNotified) return@runOnUiThread
             binding.root.removeCallbacks(pendingCountdownTick)
-            pendingExpiredAtMs = null
+            pendingRemainingSec = null
             currentQrCode = null
             authorizeCompleted = false
             standbyLoaded = false
             clearStandbyData()
             binding.validatingOverlay.visibility = View.VISIBLE
+            binding.txtOverlayTitle.text = getString(R.string.room_status_idle)
             binding.txtValidatingHost.text = ""
             binding.root.post { runAuthorizeCheck(force = true) }
         }
@@ -920,7 +923,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         runOnUiThread {
             if (blacklistNotified) return@runOnUiThread
             binding.root.removeCallbacks(pendingCountdownTick)
-            pendingExpiredAtMs = null
+            pendingRemainingSec = null
             currentQrCode = null
             authorizeCompleted = false
             standbyLoaded = false
@@ -937,7 +940,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         runOnUiThread {
             if (blacklistNotified) return@runOnUiThread
             binding.root.removeCallbacks(pendingCountdownTick)
-            pendingExpiredAtMs = null
+            pendingRemainingSec = null
             currentQrCode = null
             authorizeCompleted = false
             standbyLoaded = false
@@ -1009,9 +1012,16 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         binding.txtOverlayTitle.text = getString(titleRes)
         binding.txtValidatingHost.text = if (hintRes != 0) getString(hintRes) else ""
 
-        pendingExpiredAtMs = expiredAtMs
-        binding.root.removeCallbacks(pendingCountdownTick)
-        if (expiredAtMs != null) {
+        // 确保待机页 logo 和品牌名称正确（防止被 clearStandbyData 清空后不恢复）
+        if (binding.imgStandbyLogo.drawable == null) {
+            binding.imgStandbyLogo.setImageResource(R.drawable.home_ktv_logo)
+        }
+        binding.txtBrandName.text = currentRoomName?.ifBlank { getString(R.string.default_room_name) } ?: getString(R.string.default_room_name)
+        binding.txtBrandName.visibility = View.VISIBLE
+
+        // 只在倒计时未启动时才初始化，防止 WS 事件把正在倒数的计时重置
+        if (expiredAtMs != null && pendingRemainingSec == null) {
+            pendingRemainingSec = expiredAtMs
             updatePendingCountdown()
             binding.root.post(pendingCountdownTick)
         }
@@ -1019,42 +1029,32 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
 
     /** 刷新 pending 倒计时：合并到标题中居中显示。 */
     private fun updatePendingCountdown() {
-        val expiredAtMs = pendingExpiredAtMs ?: return
-        val remainingMs = (expiredAtMs - System.currentTimeMillis()).coerceAtLeast(0)
-        if (remainingMs <= 0) {
-            binding.txtOverlayTitle.text = getString(R.string.room_status_pending)
+        val remaining = pendingRemainingSec ?: return
+        if (remaining <= 0) {
             binding.root.removeCallbacks(pendingCountdownTick)
+            pendingRemainingSec = null
+            binding.txtOverlayTitle.text = getString(R.string.room_status_pending)
+            // 倒计时耗尽意味着申请已过期，后端已将设备拉黑。
+            // 弹出"限制接入"蒙版，1.5s 后跳转到 SetupActivity（需重新申请）。
+            runOnUiThread {
+                binding.validatingOverlay.tag = "expired"
+                binding.txtOverlayTitle.text = "您的设备被限制接入，请联系管理员"
+                binding.txtValidatingHost.text = ""
+                binding.validatingOverlay.postDelayed({
+                    if (!isFinishing) {
+                        Toast.makeText(this, "申请超时，设备已被限制", Toast.LENGTH_SHORT).show()
+                        startActivity(Intent(this, SetupActivity::class.java))
+                        finish()
+                    }
+                }, 1500)
+            }
             return
         }
-        val totalSec = remainingMs / 1000
-        val mm = (totalSec / 60).toInt()
-        val ss = (totalSec % 60).toInt()
+        val mm = (remaining / 60).toInt()
+        val ss = (remaining % 60).toInt()
         val countdown = String.format(Locale.getDefault(), "%02d:%02d", mm, ss)
         binding.txtOverlayTitle.text = "${getString(R.string.room_status_pending)} ($countdown)"
-        binding.root.postDelayed(pendingCountdownTick, 1000L)
-    }
-
-    /**
-     * 解析后端 ISO 字符串 → 毫秒时间戳。
-     * 支持格式：
-     *   - 新格式（推荐）：2026-08-19T10:52:00Z（含 Z 后缀，UTC）
-     *   - ISO offset 格式：2026-08-19T19:15:00+08:00（Java SimpleDateFormat 不识别冒号，需替换）
-     *   - 旧格式（兼容）：2026-08-19T10:52:00（无时区，按本地时区解析，有偏差但能显示）
-     * 解析失败返回 null，倒计时不显示。
-     */
-    private fun parseIsoToMs(iso: String?): Long? {
-        if (iso.isNullOrBlank()) return null
-        return try {
-            // 统一去掉末尾的 Z 后缀，再用 OffsetDateTime 解析（自动识别 +08:00 / +0000）
-            val withoutZ = iso.trimEnd('Z')
-            OffsetDateTime.parse(withoutZ)?.toInstant()?.toEpochMilli()
-        } catch (_: Exception) {
-            // 旧格式（无时区）：按本地时区解析
-            try {
-                val pattern = if (iso.contains(".")) "yyyy-MM-dd'T'HH:mm:ss.SSS" else "yyyy-MM-dd'T'HH:mm:ss"
-                SimpleDateFormat(pattern, Locale.US).parse(iso)?.time
-            } catch (_: Exception) { null }
-        }
+        pendingRemainingSec = remaining - 1
     }
 
     private fun onLogoAreaClicked() {
@@ -1478,6 +1478,7 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
             binding.imgStandbyLogo.setImageResource(R.drawable.home_ktv_logo)
             binding.imgStandbyLogo.visibility = View.VISIBLE
             binding.txtBrandName.visibility = View.VISIBLE
+            binding.txtBrandName.text = currentRoomName?.ifBlank { getString(R.string.default_room_name) } ?: getString(R.string.default_room_name)
         } else {
             lifecycleScope.launch {
                 val bitmap = mediaApi.fetchUrl(content.logoUrl)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
@@ -1485,6 +1486,12 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
                     binding.imgStandbyLogo.setImageBitmap(bitmap)
                     binding.imgStandbyLogo.visibility = View.VISIBLE
                     binding.txtBrandName.visibility = View.GONE
+                } else {
+                    // logo 加载失败，显示默认 logo 和品牌名称
+                    binding.imgStandbyLogo.setImageResource(R.drawable.home_ktv_logo)
+                    binding.imgStandbyLogo.visibility = View.VISIBLE
+                    binding.txtBrandName.visibility = View.VISIBLE
+                    binding.txtBrandName.text = currentRoomName?.ifBlank { getString(R.string.default_room_name) } ?: getString(R.string.default_room_name)
                 }
             }
         }
@@ -1565,6 +1572,10 @@ class MainActivity : AppCompatActivity(), KtvSocket.Listener {
         binding.ktvOverlay.visibility = View.GONE
         binding.audioOverlay.visibility = View.GONE
         hidePlaybackProgress()
+        // 恢复待机页图片（解散/关闭房间后 logo 会被 clearStandbyData 清空）
+        if (binding.imgStandbyLogo.drawable == null) {
+            binding.imgStandbyLogo.setImageResource(R.drawable.home_ktv_logo)
+        }
     }
 
     private fun showPlaybackProgress() {

@@ -196,22 +196,60 @@ const tickRef = ref(0)
 let countdownTimer = null
 let socket = null
 
-function handleWsEvent(type, _payload) {
-  if (
-    type === 'new_room_application' ||
-    type === 'application_approved' ||
-    type === 'application_expired' ||
-    type === 'room_disabled' ||
-    type === 'room_dissolved' ||
-    type === 'room_expired' ||
-    type === 'room_promoted' ||
-    type === 'room_name_changed' ||
-    type === 'room_time_changed' ||
-    type === 'qr_code_refreshed' ||
-    type === 'device_blacklisted' ||
-    type === 'room_list_updated'
-  ) {
-    loadData()
+function handleWsEvent(type, payload) {
+  console.log('[RoomManagement] WS 事件:', type, payload)
+  switch (type) {
+    case 'new_room_application': {
+      // 直接添加新申请到列表，避免事务时序问题
+      const newApp = {
+        id: payload.room_id,
+        deviceId: payload.device_id,
+        roomId: payload.room_id,
+        name: payload.name || '',
+        createdAt: payload.created_at,
+        expiredAt: null, // 后端会在下次 loadData 时提供
+        expiredInSeconds: 180 // 默认 3 分钟
+      }
+      // 避免重复添加
+      if (!pendingApplications.value.find(a => a.id === newApp.id)) {
+        pendingApplications.value.unshift(newApp)
+      }
+      break
+    }
+    case 'application_approved': {
+      // 从申请列表移除
+      pendingApplications.value = pendingApplications.value.filter(a => a.id !== payload.application_id)
+      // 触发完整刷新获取最新的房间数据
+      loadData()
+      break
+    }
+    case 'application_expired': {
+      // 从申请列表移除
+      pendingApplications.value = pendingApplications.value.filter(a => a.id !== payload.application_id)
+      break
+    }
+    case 'device_blacklisted': {
+      // 添加到黑名单
+      if (!blacklist.value.find(b => b.deviceId === payload.device_id)) {
+        blacklist.value.unshift({
+          deviceId: payload.device_id,
+          reason: payload.reason || '申请超时自动拉黑',
+          createdAt: new Date().toISOString()
+        })
+      }
+      break
+    }
+    case 'room_disabled':
+    case 'room_dissolved':
+    case 'room_expired':
+    case 'room_promoted':
+    case 'room_name_changed':
+    case 'room_time_changed':
+    case 'qr_code_refreshed':
+    case 'room_list_updated':
+      // 这些事件需要完整刷新
+      loadData()
+      break
   }
 }
 
@@ -256,6 +294,7 @@ onUnmounted(() => {
 })
 
 async function loadData() {
+  console.log('[RoomManagement] loadData 开始调用 API')
   try {
     const [rooms, idle, applications, bl] = await Promise.all([
       api.roomList(),
@@ -263,6 +302,8 @@ async function loadData() {
       api.roomApplications(),
       api.blacklist()
     ])
+    console.log('[RoomManagement] loadData 结果:', { rooms, idle, applications, bl })
+    console.log('[RoomManagement] pendingApplications 数量:', applications?.length || 0)
     approvedRooms.value = rooms || []
     idleRooms.value = idle || []
     pendingApplications.value = applications || []
@@ -290,9 +331,8 @@ function formatTimeRange(room) {
 }
 
 function getRemainingSeconds(app) {
-  if (!app.expiredAt) return 180
-  const remaining = new Date(app.expiredAt) - new Date()
-  return Math.max(0, Math.floor(remaining / 1000))
+  // 直接使用后端计算好的剩余秒数，避免前端时区计算误差
+  return Math.max(0, app.expiredInSeconds || 0)
 }
 
 function getRemainingTime(app) {
@@ -315,6 +355,10 @@ function tickCountdown() {
   // 推动模板重算 getRemainingSeconds
   tickRef.value = (tickRef.value + 1) % 1000000
   for (const app of pendingApplications.value) {
+    // 前端递减剩余秒数（由后端计算初值，避免时区问题）
+    if (app.expiredInSeconds && app.expiredInSeconds > 0) {
+      app.expiredInSeconds--
+    }
     const secs = getRemainingSeconds(app)
     if (secs <= 0 && app.id && !expireTriggeredIds.has(app.id)) {
       expireTriggeredIds.add(app.id)

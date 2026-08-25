@@ -1,5 +1,7 @@
 package com.homektv.security;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -41,14 +43,19 @@ import java.util.Base64;
 @Component
 public class QrTokenCipher {
 
+    private static final Logger log = LoggerFactory.getLogger(QrTokenCipher.class);
+
     private static final String ALGO = "HmacSHA256";
     /** 当前协议版本号。改动布局后必须自增；旧 token decode 时会被判为 unsupported。 */
     private static final byte PROTO_VER = 2;
     private final byte[] secret;
     private final SecureRandom random = new SecureRandom();
+    private static final ThreadLocal<Boolean> IN_SELF_TEST = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     public QrTokenCipher(@Value("${ktv.qr.secret:ktv-default-qr-secret-change-me-in-prod}") String secret) {
         this.secret = secret.getBytes(StandardCharsets.UTF_8);
+        log.info("QrTokenCipher 初始化: secret.length={}, secret.hashCode={}",
+                secret.length(), java.util.Arrays.hashCode(this.secret));
     }
 
     /**
@@ -61,6 +68,8 @@ public class QrTokenCipher {
      * @return Base64(URL-safe) 字符串
      */
     public String encode(String roomId, long qrCodeVersion, Long activeStartMs, Long activeEndMs) {
+        log.info("encode 开始: roomId={}, qrCodeVersion={}, activeStartMs={}, activeEndMs={}", 
+                roomId, qrCodeVersion, activeStartMs, activeEndMs);
         // 布局（protoVer=2）：
         //   [flags:1][ver:1][nonce:8][roomIdLen:1][roomId:N][qrCodeVersion:8][startMs?:8][endMs?:8][sig:32]
         byte[] roomIdBytes = roomId.getBytes(StandardCharsets.UTF_8);
@@ -68,47 +77,49 @@ public class QrTokenCipher {
             throw new IllegalArgumentException("roomId too long");
         }
 
-        int size = 1 + 8 + 1 + roomIdBytes.length + 8; // flags+protoVer+nonce+roomIdLen+roomId+qrCodeVersion
         byte flags = 0;
-        if (activeStartMs != null) {
-            flags |= 0x01;
-            size += 8;
-        }
-        if (activeEndMs != null) {
-            flags |= 0x02;
-            size += 8;
-        }
-        size += 32; // HMAC
+        if (activeStartMs != null) flags |= 0x01;
+        if (activeEndMs != null) flags |= 0x02;
 
-        byte[] buf = new byte[size];
+        // 总长度 = 1(flags) + 1(protoVer) + 8(nonce) + 1(roomIdLen) + roomIdLen + 8(qrCodeVersion)
+        //        + (activeStartMs != null ? 8 : 0) + (activeEndMs != null ? 8 : 0) + 32(sig)
+        int size = 1 + 1 + 8 + 1 + roomIdBytes.length + 8 + 32;
+        if (activeStartMs != null) size += 8;
+        if (activeEndMs != null) size += 8;
+
+        byte[] out = new byte[size];
         int off = 0;
-        buf[off++] = PROTO_VER;
+        out[off++] = flags;            // 关键修复：flags 写入 out[0]，参与 HMAC
+        out[off++] = PROTO_VER;
         byte[] nonce = new byte[8];
         random.nextBytes(nonce);
-        System.arraycopy(nonce, 0, buf, off, 8);
+        System.arraycopy(nonce, 0, out, off, 8);
         off += 8;
-        buf[off++] = (byte) roomIdBytes.length;
-        System.arraycopy(roomIdBytes, 0, buf, off, roomIdBytes.length);
+        out[off++] = (byte) roomIdBytes.length;
+        System.arraycopy(roomIdBytes, 0, out, off, roomIdBytes.length);
         off += roomIdBytes.length;
-        writeLong(buf, off, qrCodeVersion);
+        writeLong(out, off, qrCodeVersion);
         off += 8;
         if (activeStartMs != null) {
-            writeLong(buf, off, activeStartMs);
+            writeLong(out, off, activeStartMs);
             off += 8;
         }
         if (activeEndMs != null) {
-            writeLong(buf, off, activeEndMs);
+            writeLong(out, off, activeEndMs);
             off += 8;
         }
-        // 签名覆盖 flags + protoVer + nonce + payload
-        byte[] sig = hmac(buf, 0, off);
-        System.arraycopy(sig, 0, buf, off, sig.length);
-
-        // flags 加到密文前部
-        byte[] out = new byte[size + 1];
-        out[0] = flags;
-        System.arraycopy(buf, 0, out, 1, size);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(out);
+        // 签名覆盖 flags + protoVer + nonce + payload（与 decode 端 all[0..off) 完全一致）
+        StringBuilder hmacInHex = new StringBuilder();
+        for (int i = 0; i < off; i++) {
+            hmacInHex.append(String.format("%02x", out[i]));
+        }
+        log.info("=== ENCODE HMAC 输入数据 hex (长度={}): {}", off, hmacInHex);
+        byte[] sig = hmac(out, 0, off);
+        log.info("=== ENCODE 计算 sig hex: {}", bytesToHex(sig));
+        System.arraycopy(sig, 0, out, off, sig.length);
+        String token = Base64.getUrlEncoder().withoutPadding().encodeToString(out);
+        log.info("encode 完成: size={}, flags=0x{}, token前16={}", size, String.format("%02x", flags), token.substring(0, Math.min(16, token.length())));
+        return token;
     }
 
     /**
@@ -128,12 +139,36 @@ public class QrTokenCipher {
         } catch (IllegalArgumentException e) {
             throw new QrTokenInvalidException("invalid base64");
         }
+        log.info("decode: token长度={}, all.length={}", token.length(), all.length);
+
+        // 自检：用当前 secret 走一遍 encode→decode 闭环，确保配置对称
+        if (Boolean.TRUE.equals(IN_SELF_TEST.get())) {
+            // 递归保护：self-test decode 时跳过
+            log.info("=== SELF-TEST 跳过（递归保护）");
+        } else {
+            try {
+                IN_SELF_TEST.set(Boolean.TRUE);
+                String probe = encode("f1d0a35f-83f3-4a31-b8aa-d9aba761c706", 1L, null, null);
+                byte[] probeBytes = Base64.getUrlDecoder().decode(probe);
+                log.info("=== SELF-TEST encode token长度={}, all.length={}", probe.length(), probeBytes.length);
+                Decoded d = decode(probe);
+                log.info("=== SELF-TEST encode→decode 闭环成功: roomId={}", d.roomId());
+            } catch (Exception e) {
+                log.warn("=== SELF-TEST encode→decode 闭环失败: {}", e.getMessage(), e);
+            } finally {
+                IN_SELF_TEST.set(Boolean.FALSE);
+            }
+        }
+
         if (all.length < 1 + 1 + 8 + 1 + 8 + 32) {
             throw new QrTokenInvalidException("token too short");
         }
         byte flags = all[0];
         int off = 1;
-        if (all[off++] != PROTO_VER) {
+        byte protoVer = all[off++];
+        log.info("decode: flags=0x{}, protoVer={}, 期望PROTO_VER={}", 
+                String.format("%02x", flags), protoVer, PROTO_VER);
+        if (protoVer != PROTO_VER) {
             throw new QrTokenInvalidException("unsupported version");
         }
         // 跳过 nonce
@@ -146,6 +181,7 @@ public class QrTokenCipher {
         System.arraycopy(all, off, roomIdBytes, 0, roomIdLen);
         off += roomIdLen;
         String roomId = new String(roomIdBytes, StandardCharsets.UTF_8);
+        log.info("decode: roomId={}, roomIdLen={}", roomId, roomIdLen);
         long qrCodeVersion = readLong(all, off);
         off += 8;
 
@@ -161,12 +197,26 @@ public class QrTokenCipher {
         }
         // 验证签名：覆盖 all[0..off)（含 flags、protoVer、nonce、payload）
         byte[] expected = hmac(all, 0, off);
+        StringBuilder hmacInHex = new StringBuilder();
+        for (int i = 0; i < off; i++) {
+            hmacInHex.append(String.format("%02x", all[i]));
+        }
+        log.info("=== DECODE HMAC 输入数据 hex (长度={}): {}", off, hmacInHex);
+        log.info("=== DECODE 期望 sig hex: {}", bytesToHex(expected));
         if (off + 32 != all.length) {
+            log.warn("decode 签名验证失败 [trailing data]: off={}, 32={}, all.length={}", off, 32, all.length);
             throw new QrTokenInvalidException("trailing data");
         }
-        if (!constantTimeEquals(expected, 0, all, off, 32)) {
-            throw new QrTokenInvalidException("bad signature");
+        boolean sigMatch = constantTimeEquals(expected, 0, all, off, 32);
+        log.info("=== DECODE token 中 sig hex: {}", bytesToHex(java.util.Arrays.copyOfRange(all, off, all.length)));
+        log.info("=== DECODE sigMatch={}", sigMatch);
+        if (!sigMatch) {
+            // 即使签名失败也要提取 roomId，方便调用方通知 TV 刷新 QR
+            log.warn("decode 签名验证失败 [bad signature]");
+            throw new QrTokenInvalidException("bad signature", roomId);
         }
+        log.info("decode 成功: roomId={}, qrCodeVersion={}, activeStartMs={}, activeEndMs={}", 
+                roomId, qrCodeVersion, activeStartMs, activeEndMs);
         return new Decoded(roomId, qrCodeVersion, activeStartMs, activeEndMs);
     }
 
@@ -214,6 +264,23 @@ public class QrTokenCipher {
 
     /** 二维码 token 无效时抛出的异常（签名错误、过期、被篡改等）。 */
     public static class QrTokenInvalidException extends RuntimeException {
-        public QrTokenInvalidException(String message) { super(message); }
+        private final String roomId;
+
+        public QrTokenInvalidException(String message) { this(message, null); }
+
+        public QrTokenInvalidException(String message, String roomId) {
+            super(message);
+            this.roomId = roomId;
+        }
+
+        public String roomId() { return roomId; }
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 }

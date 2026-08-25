@@ -38,8 +38,20 @@ public class RoomController {
      * 获取所有待审核申请
      */
     @GetMapping("/applications")
-    public List<RoomApplication> getPendingApplications() {
-        return roomService.getPendingApplications();
+    public List<Map<String, Object>> getPendingApplications() {
+        List<RoomApplication> apps = roomService.getPendingApplications();
+        return apps.stream().map(app -> {
+            Map<String, Object> map = new java.util.HashMap<>();
+            map.put("id", app.getId().toString());
+            map.put("deviceId", app.getDeviceId());
+            map.put("roomId", app.getRoomId() != null ? app.getRoomId().toString() : null);
+            map.put("status", app.getStatus().name());
+            map.put("createdAt", app.getCreatedAt());
+            map.put("expiredAt", app.getExpiredAt());
+            // 直接返回计算好的剩余秒数，避免前端时区问题
+            map.put("expiredInSeconds", app.getExpiredInSeconds());
+            return map;
+        }).toList();
     }
 
     /**
@@ -178,11 +190,14 @@ public class RoomController {
                     "is_new_member", result.isNewMember
             ));
         } else {
-            // 用 403 让前端能区分业务错误（可展示弹窗）和网络错误（catch 到的非 2xx）
-            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of(
-                    "success", false,
-                    "message", result.message
-            ));
+            var resp = new java.util.HashMap<String, Object>();
+            resp.put("success", false);
+            resp.put("message", result.message);
+            // 签名失败时同步返回最新 QR，让 H5 可以直接展示给用户重新扫码
+            if (result.latestQrCode != null) {
+                resp.put("latest_qr_code", result.latestQrCode);
+            }
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(resp);
         }
     }
 

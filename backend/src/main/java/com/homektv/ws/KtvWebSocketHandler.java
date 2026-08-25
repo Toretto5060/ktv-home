@@ -71,18 +71,19 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
             String deviceId = deviceIdObj != null ? deviceIdObj.toString() : null;
             if (deviceId != null) {
                 tvProbe = roomService.connect(deviceId);
-                // 对所有非黑名单状态都设置 room_id（用于 broadcastToRoom 查找会话）
-                if (tvProbe.room != null) {
-                    session.getAttributes().put("room_id", tvProbe.room.getId().toString());
-                }
                 if ("blacklisted".equals(tvProbe.status)) {
                     session.close(CloseStatus.POLICY_VIOLATION);
                     log.info("TV设备 {} 在黑名单中，拒绝连接", deviceId);
                     return;
                 }
+                // 必须在 register() 之前设置 room_id，否则 SessionInfo 快照为 null
+                if (tvProbe.room != null) {
+                    session.getAttributes().put("room_id", tvProbe.room.getId().toString());
+                }
             }
         }
 
+        // register() 会创建 SessionInfo 并快照 room_id，必须在 room_id 设置之后调用
         broadcaster.register(session);
 
         if (tvProbe != null) {

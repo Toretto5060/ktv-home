@@ -25,7 +25,6 @@ let closed = false
 function ensureSocket() {
   if (socket) return
   closed = false
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   socket = new KtvSocket({
     onEvent(type, payload) {
       const cbs = handlers.get(type)

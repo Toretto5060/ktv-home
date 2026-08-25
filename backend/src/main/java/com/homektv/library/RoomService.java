@@ -167,6 +167,20 @@ public class RoomService {
 
         RoomApplication app = optApp.get();
         log.info("approveApplication: 当前状态 {}", app.getStatus());
+        if (app.getStatus() == ApplicationStatus.APPROVED) {
+            // 申请已批准（TV 重连时可能已新建了新的 pending 申请），
+            // 仍需通知 TV 因为当前连接可能用的是旧申请。
+            log.warn("approveApplication: 申请 {} 已是 APPROVED，重新通知 TV", applicationId);
+            Room room = roomRepository.findById(app.getRoomId()).orElse(null);
+            if (room != null) {
+                try {
+                    notifyTvApproved(room);
+                } catch (Exception e) {
+                    log.warn("重新通知TV端失败: {}", e.getMessage());
+                }
+            }
+            return true;
+        }
         if (app.getStatus() != ApplicationStatus.PENDING) return false;
 
         Optional<Room> optRoom = roomRepository.findById(app.getRoomId());
@@ -358,7 +372,7 @@ public class RoomService {
     }
 
     /**
-     * 关闭房间：删除授权，Room 状态改回 PENDING，TV 重新走申请流程。
+     * 关闭房间：Room 状态改回 REJECTED，加入黑名单，不在任何列表显示。
      */
     @Transactional
     public boolean disableRoom(UUID roomId) {
@@ -366,7 +380,7 @@ public class RoomService {
         if (optRoom.isEmpty()) return false;
 
         Room room = optRoom.get();
-        if (room.getStatus() != Room.RoomStatus.APPROVED) return false;
+        if (room.getStatus() == Room.RoomStatus.REJECTED) return false;
 
         // 改为 REJECTED 加入黑名单，不在任何列表显示
         room.setStatus(Room.RoomStatus.REJECTED);
@@ -492,19 +506,50 @@ public class RoomService {
         try {
             decoded = qrCipher.decode(qrCode);
         } catch (QrTokenInvalidException e) {
+            log.warn("joinRoom 失败 [解密失败]: {} - qrCode前16={}", e.getMessage(), qrCode.substring(0, Math.min(16, qrCode.length())));
+            // 签名失败时，异常已携带 roomId，通知 TV 推送最新 QR 让其自动刷新
+            if (e.roomId() != null) {
+                try {
+                    UUID roomId = UUID.fromString(e.roomId());
+                    String[] latestQrHolder = new String[1];
+                    roomRepository.findById(roomId).ifPresent(room -> {
+                        String latestQr = room.getQrCode();
+                        if (latestQr != null && !latestQr.isBlank()) {
+                            latestQrHolder[0] = latestQr;
+                            broadcaster.broadcastToRoom(roomId.toString(),
+                                    WsEvent.of(WsEvent.QR_CODE_REFRESHED, Map.of(
+                                            "room_id", roomId.toString(),
+                                            "qr_code", latestQr
+                                    )));
+                            log.info("joinRoom 签名失败，已通知 TV 房间 {} 推送最新 QR", roomId);
+                        }
+                    });
+                    return JoinResult.invalid("二维码无效", latestQrHolder[0]);
+                } catch (Exception ex) {
+                    log.warn("joinRoom 签名失败后通知 TV 失败: {}", ex.getMessage());
+                }
+            }
             return JoinResult.invalid("二维码无效");
         }
+        log.info("joinRoom 解密成功: roomId={}, qrCodeVersion={}, activeStartMs={}, activeEndMs={}", 
+                decoded.roomId(), decoded.qrCodeVersion(), decoded.activeStartMs(), decoded.activeEndMs());
 
         Optional<Room> optRoom = roomRepository.findById(UUID.fromString(decoded.roomId()));
         if (optRoom.isEmpty()) {
+            log.warn("joinRoom 失败 [房间不存在]: decodedRoomId={}", decoded.roomId());
             return JoinResult.invalid("二维码无效");
         }
 
         Room room = optRoom.get();
+        log.info("joinRoom 房间状态: id={}, status={}, qrCodeVersion={}, activeStart={}, activeEnd={}", 
+                room.getId(), room.getStatus(), room.getQrCodeVersion(), room.getActiveStart(), room.getActiveEnd());
 
         // 校验 QR 版本号：每次 generateQrCode 会自增，版本不匹配说明 QR 已刷新，旧 QR 失效
         long currentVersion = room.getQrCodeVersion() == null ? 1L : room.getQrCodeVersion();
+        log.info("joinRoom 版本检查: decodedVersion={}, currentVersion={}, 匹配={}", 
+                decoded.qrCodeVersion(), currentVersion, decoded.qrCodeVersion() == currentVersion);
         if (decoded.qrCodeVersion() != currentVersion) {
+            log.warn("joinRoom 失败 [版本不匹配]: decoded={}, current={}", decoded.qrCodeVersion(), currentVersion);
             return JoinResult.invalid("二维码已失效，请刷新后重试");
         }
 
@@ -514,23 +559,35 @@ public class RoomService {
                 ? room.getActiveStart().toInstant(ZoneOffset.UTC).toEpochMilli() : null;
         Long roomEndMs = room.getActiveEnd() != null
                 ? room.getActiveEnd().toInstant(ZoneOffset.UTC).toEpochMilli() : null;
+        log.info("joinRoom 有效期检查: decodedActiveStart={}, decodedActiveEnd={}, roomActiveStart={}, roomActiveEnd={}, nowMs={}", 
+                decoded.activeStartMs(), decoded.activeEndMs(), roomStartMs, roomEndMs, nowMs);
         if (!Objects.equals(decoded.activeStartMs(), roomStartMs)
                 || !Objects.equals(decoded.activeEndMs(), roomEndMs)) {
+            log.warn("joinRoom 失败 [有效期不匹配]: decodedStart={}, roomStart={}, decodedEnd={}, roomEnd={}", 
+                    decoded.activeStartMs(), roomStartMs, decoded.activeEndMs(), roomEndMs);
             return JoinResult.invalid("二维码已过期，请刷新后重试");
         }
         if (decoded.isExpired(nowMs)) {
+            log.warn("joinRoom 失败 [二维码已过期]: nowMs={}, activeEndMs={}", nowMs, decoded.activeEndMs());
             return JoinResult.invalid("二维码已过期，请刷新后重试");
         }
 
         // 验证房间状态
+        log.info("joinRoom 房间状态检查: status={}, 期望APPROVED={}", room.getStatus(), room.getStatus() == Room.RoomStatus.APPROVED);
         if (room.getStatus() != Room.RoomStatus.APPROVED) {
+            log.warn("joinRoom 失败 [房间状态不是APPROVED]: status={}", room.getStatus());
             return JoinResult.invalid("房间未开放");
         }
 
         // 验证开放时间
-        if (!room.isInActiveTime()) {
+        boolean inActiveTime = room.isInActiveTime();
+        log.info("joinRoom 开放时间检查: inActiveTime={}", inActiveTime);
+        if (!inActiveTime) {
+            log.warn("joinRoom 失败 [不在开放时间内]");
             return JoinResult.invalid("房间暂未开放");
         }
+
+        log.info("joinRoom 全部检查通过! deviceId={}, nickname={}", deviceId, nickname);
 
         // 检查是否已加入
         Optional<RoomMember> existing = memberRepository.findByRoomIdAndDeviceId(room.getId(), deviceId);
@@ -578,7 +635,12 @@ public class RoomService {
      * 获取所有待审核申请
      */
     public List<RoomApplication> getPendingApplications() {
-        return applicationRepository.findByStatus(ApplicationStatus.PENDING);
+        List<RoomApplication> apps = applicationRepository.findByStatus(ApplicationStatus.PENDING);
+        log.info("getPendingApplications: 共 {} 条待审核申请", apps.size());
+        for (RoomApplication app : apps) {
+            log.info("  - {}: deviceId={}, roomId={}, expiredAt={}", app.getId(), app.getDeviceId(), app.getRoomId(), app.getExpiredAt());
+        }
+        return apps;
     }
 
     /**
@@ -649,18 +711,17 @@ public class RoomService {
 
         // 通知TV端超时 + 管理员黑名单更新（try 包住避免 WS 异常导致事务 rollback）
         try {
-            roomRepository.findById(app.getRoomId()).ifPresent(room -> {
-                broadcaster.broadcast(WsEvent.of(WsEvent.APPLICATION_EXPIRED, Map.of(
-                        "room_id", room.getId().toString(),
-                        "device_id", app.getDeviceId(),
-                        "application_id", app.getId().toString()
-                )));
-                // 通知管理员黑名单已更新
-                broadcaster.broadcast(WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of(
-                        "device_id", app.getDeviceId(),
-                        "reason", "申请超时3分钟自动拉黑"
-                )));
-            });
+            // 通知TV端申请已过期
+            broadcaster.broadcast(WsEvent.of(WsEvent.APPLICATION_EXPIRED, Map.of(
+                    "room_id", app.getRoomId() != null ? app.getRoomId().toString() : "",
+                    "device_id", app.getDeviceId(),
+                    "application_id", app.getId().toString()
+            )));
+            // 通知管理员黑名单已更新
+            broadcaster.broadcast(WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of(
+                    "device_id", app.getDeviceId(),
+                    "reason", "申请超时3分钟自动拉黑"
+            )));
         } catch (Exception e) {
             log.warn("通知超时失败，不影响拉黑结果: {}", e.getMessage());
         }
@@ -761,11 +822,14 @@ public class RoomService {
                 ));
                 case "pending" -> WsEvent.of(WsEvent.DEVICE_PENDING, Map.of(
                         "application_id", application.getId().toString(),
-                        "expired_at", application.getExpiredAt().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                        "expired_in_seconds", Math.max(0, java.time.Duration.between(
+                                java.time.LocalDateTime.now(), application.getExpiredAt()
+                        ).getSeconds())
                 ));
                 case "idle" -> WsEvent.of(WsEvent.DEVICE_IDLE, Map.of());
                 case "room_not_open" -> WsEvent.of(WsEvent.DEVICE_ROOM_NOT_OPEN, Map.of());
-                default -> WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of());
+                case "blacklisted" -> WsEvent.of(WsEvent.DEVICE_BLACKLISTED, Map.of());
+                default -> throw new IllegalStateException("未知 connect 状态: " + status);
             };
         }
     }
@@ -776,21 +840,29 @@ public class RoomService {
         public final Room room;
         public final RoomMember member;
         public final boolean isNewMember;
+        /** 解密失败时，TV 已收到最新 QR（用于 H5 提示用户刷新） */
+        public final String latestQrCode;
 
-        private JoinResult(boolean success, String message, Room room, RoomMember member, boolean isNewMember) {
+        private JoinResult(boolean success, String message, Room room, RoomMember member,
+                           boolean isNewMember, String latestQrCode) {
             this.success = success;
             this.message = message;
             this.room = room;
             this.member = member;
             this.isNewMember = isNewMember;
+            this.latestQrCode = latestQrCode;
         }
 
         public static JoinResult invalid(String message) {
-            return new JoinResult(false, message, null, null, false);
+            return invalid(message, null);
+        }
+
+        public static JoinResult invalid(String message, String latestQrCode) {
+            return new JoinResult(false, message, null, null, false, latestQrCode);
         }
 
         public static JoinResult success(Room room, RoomMember member, boolean isNewMember) {
-            return new JoinResult(true, null, room, member, isNewMember);
+            return new JoinResult(true, null, room, member, isNewMember, null);
         }
     }
 }

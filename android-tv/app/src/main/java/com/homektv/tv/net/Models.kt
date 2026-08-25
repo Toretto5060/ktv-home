@@ -145,7 +145,11 @@ data class TvAuthorizeResult(
     val roomId: String? = null,
     val roomName: String? = null,
     val applicationId: String? = null,
-    val expiredAt: String? = null,
+    /**
+     * 申请剩余有效期（秒），pending 状态时非 null。
+     * 后端直接返回剩余秒数，客户端按秒倒计时，无需解析时间字符串。
+     */
+    val expiredAt: Long? = null,
     /** 当前 qr_code（TV 端 HTTP 授权时直接拿到，避免等 WS 的 device_approved 事件）。 */
     val qrCode: String? = null,
 ) {

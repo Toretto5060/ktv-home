@@ -278,7 +278,7 @@ class MediaApi(private val config: AppConfig) {
                         roomName = null,
                         qrCode = null,
                         applicationId = (obj["application_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
-                        expiredAt = (obj["expired_at"] as? kotlinx.serialization.json.JsonPrimitive)?.content,
+                        expiredAt = (obj["expired_in_seconds"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull(),
                     )
                     "blacklisted" -> TvAuthorizeResult(status = "blacklisted", roomId = null, roomName = null, applicationId = null, expiredAt = null, qrCode = null)
                     "room_not_open" -> TvAuthorizeResult(status = "room_not_open", roomId = null, roomName = null, applicationId = null, expiredAt = null, qrCode = null)

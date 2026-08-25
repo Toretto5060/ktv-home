@@ -9,7 +9,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -55,8 +54,11 @@ public class TvAuthorizeController {
             case "pending" -> {
                 RoomApplication app = result.application;
                 body.put("application_id", app.getId().toString());
-                // ISO-8601 UTC 带 Z，TV 端 parseIsoToMs() 解析
-                body.put("expired_at", app.getExpiredAt().atOffset(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME));
+                // 剩余秒数（倒计时），避免跨时区解析问题
+                long remainingSec = java.time.Duration.between(
+                        java.time.LocalDateTime.now(), app.getExpiredAt()
+                ).getSeconds();
+                body.put("expired_in_seconds", Math.max(0, remainingSec));
             }
             case "approved" -> {
                 Room room = result.room;

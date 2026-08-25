@@ -220,19 +220,25 @@ public class WsBroadcaster {
      */
     public void broadcastToRoom(String roomId, WsEvent event) {
         String json = serialize(event);
-        log.info("broadcastToRoom: 查找房间 {}，当前会话数 {}", roomId, sessions.size());
+        log.info("broadcastToRoom: 事件类型 {}，查找房间 {}，当前会话数 {}", event.type(), roomId, sessions.size());
+        boolean found = false;
         for (SessionInfo info : sessions.values()) {
             Object rid = info.session.getAttributes().get("room_id");
-            log.info("  会话 {} 的 room_id: {}", info.sessionId, rid);
+            Object clientType = info.session.getAttributes().get("client_type");
             if (rid != null && roomId.equals(rid.toString())) {
-                Object clientType = info.session.getAttributes().get("client_type");
                 if (!"tv".equals(clientType == null ? null : clientType.toString())) continue;
                 log.info("  找到目标 TV 会话 {}，发送事件 {}", info.sessionId, event.type());
                 send(info.session, json);
-                return;
+                found = true;
             }
         }
-        log.warn("未找到房间 {} 的 TV 会话", roomId);
+        if (!found) {
+            log.warn("broadcastToRoom: 未找到房间 {} 的 TV 会话，已知 room_id 的会话: {}", roomId,
+                sessions.values().stream()
+                    .filter(i -> i.session.getAttributes().get("room_id") != null)
+                    .map(i -> i.session.getAttributes().get("room_id").toString())
+                    .toList());
+        }
     }
 
     /**

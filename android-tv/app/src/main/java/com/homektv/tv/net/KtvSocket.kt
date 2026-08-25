@@ -44,7 +44,7 @@ class KtvSocket(
         fun onConnectionFailed() {}
         /** 设备注册结果。 */
         fun onDeviceApproved(roomName: String, qrCode: String?, activeStart: String?, activeEnd: String?) {}
-        fun onDevicePending(expiredAt: String?) {}
+        fun onDevicePending(expiredAtMs: Long?) {}
         fun onDeviceBlacklisted() {}
         fun onDeviceIdle() {}
         fun onRoomNotOpen() {}
@@ -172,6 +172,7 @@ class KtvSocket(
     }
 
     private fun dispatch(type: String, payload: kotlinx.serialization.json.JsonElement?) {
+        Log.d(TAG, "dispatch: type=$type payload=$payload")
         when (type) {
             "pong" -> {}
             "progress" -> {
@@ -197,8 +198,8 @@ class KtvSocket(
             }
             "device_pending" -> {
                 val obj = payload as? JsonObject
-                val expiredAt = obj?.get("expired_at")?.jsonPrimitive?.contentOrNullSafe()
-                listener.onDevicePending(expiredAt)
+                val expiredInSeconds = (obj?.get("expired_in_seconds") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
+                listener.onDevicePending(expiredInSeconds)
             }
             "device_blacklisted" -> listener.onDeviceBlacklisted()
             "device_idle" -> listener.onDeviceIdle()
