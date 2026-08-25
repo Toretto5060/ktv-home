@@ -86,7 +86,7 @@ async function tryJoinRoom() {
     if (result.success) {
       roomName.value = result.room_name
       joinedRoomId.value = result.room_id || ''
-      user.setJoinedRoom(scannedQrCode.value, joinedRoomId.value)
+      user.setJoinedRoom(scannedQrCode.value, joinedRoomId.value, result.room_name)
       scanStatus.value = {
         type: 'success',
         message: `已加入房间"${result.room_name}"${result.is_new_member ? '' : '（您已在房间中）'}`

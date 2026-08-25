@@ -163,7 +163,7 @@ router.beforeEach(async (to) => {
       qr.markInvalid(result.message || '二维码无效或已过期')
       return { name: 'invalid' }
     }
-    user.setJoinedRoom(urlQr, result.payload?.room_id)
+    user.setJoinedRoom(urlQr, result.payload?.room_id, result.payload?.room_name)
     // URL 上的 room / qr 参数只用于一次性校验，避免污染业务路由；继续前往目标页
     // Strip room/qr query so it doesn't pollute the target route; continue to target
     if (to.query && (to.query.room || to.query.qr)) {

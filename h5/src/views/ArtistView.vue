@@ -27,11 +27,12 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import api, { makeControls } from '../api/client'
 import { useUserStore } from '../stores/user'
+import { usePlayerStore } from '../stores/player'
 import { useToast } from '../composables/useToast'
 import TabBar from '../components/TabBar.vue'
 import SongRow from '../components/SongRow.vue'
 
-const route = useRoute(), user = useUserStore(), { toast } = useToast(), controls = makeControls(user.clientToken)
+const route = useRoute(), user = useUserStore(), player = usePlayerStore(), { toast } = useToast(), controls = makeControls(user.clientToken)
 const songs = ref([]), loading = ref(true), sort = ref(route.query.sort || 'hot'), artistGender = ref(route.query.artistGender || '')
 const genderOptions = [{ value:'', label:'全部歌手' }, { value:'男歌手', label:'男歌手' }, { value:'女歌手', label:'女歌手' }, { value:'组合', label:'组合' }]
 // 已点歌曲 ID 集合，防止重复点歌 / Set of ordered song IDs to prevent duplicate ordering
@@ -87,7 +88,7 @@ function setGender(value) { artistGender.value = value; load() }
  *
  * @param {{ id: string }} song - 歌曲对象 / song object
  */
-async function order(song) { try { await controls.order(song.id); orderedIds.add(song.id); toast('已加入队列') } catch (error) { toast(error.message || '点歌失败') } }
+async function order(song) { if (!player.tvOnline) { toast('电视离线中，无法点歌'); return } try { await controls.order(song.id); orderedIds.add(song.id); toast('已加入队列') } catch (error) { toast(error.message || '点歌失败') } }
 
 /**
  * 将毫秒时长格式化为 mm:ss 字符串。

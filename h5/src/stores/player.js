@@ -66,7 +66,7 @@ export const usePlayerStore = defineStore('player', {
     handleEvent(type, payload) {
       switch (type) {
         case 'sync_full':
-          this.applySnapshot(payload)
+          this.applySnapshot(payload, true)
           break
         case 'queue_updated':
         case 'now_playing':
@@ -84,6 +84,28 @@ export const usePlayerStore = defineStore('player', {
         case 'effect_play':
           this.lastEffect = payload?.effect_id ?? null
           break
+        // TV 上线/离线独立事件（H5 /m/queue 页面横幅依赖此更新）
+        case 'tv_status':
+          if (typeof payload?.online === 'boolean') {
+            console.log('[playerStore] tv_status before:', this.tvOnline, '→ after:', payload.online)
+            this.tvOnline = payload.online
+            console.log('[playerStore] tv_status updated, this.tvOnline =', this.tvOnline)
+          }
+          break
+        case 'device_approved':
+          if (typeof payload?.online === 'boolean') this.tvOnline = payload.online
+          else this.tvOnline = true
+          if (payload?.name) {
+            const user = useUserStore()
+            user.setRoomName(payload.name)
+          }
+          break
+        case 'device_idle':
+        case 'room_dissolved':
+        case 'device_blacklisted':
+        case 'room_disabled':
+          this.tvOnline = false
+          break
         default:
           break
       }
@@ -96,7 +118,7 @@ export const usePlayerStore = defineStore('player', {
      *
      * @param {object} snap - 服务端快照对象 / server snapshot object
      */
-    applySnapshot(snap) {
+    applySnapshot(snap, fromSyncFull = false) {
       if (!snap) return
       // now_playing / player_state 等事件 payload 也是完整 snapshot
       // Events like now_playing / player_state also carry a full snapshot payload
@@ -109,7 +131,11 @@ export const usePlayerStore = defineStore('player', {
       this.muted = snap.muted ?? false
       this.vocalMode = snap.vocalMode ?? this.vocalMode
       this.queue = snap.list ?? []
-      this.tvOnline = snap.tvOnline ?? true
+      // tvOnline 只从 sync_full 信任，其他事件不携带此字段
+      // tvOnline is only trusted from sync_full snapshot; other events don't carry it
+      if (fromSyncFull && snap.tvOnline !== undefined) {
+        this.tvOnline = snap.tvOnline
+      }
       this.connectedPhones = snap.connectedPhones ?? 0
     }
   }

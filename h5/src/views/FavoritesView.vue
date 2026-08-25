@@ -30,9 +30,11 @@ import SongRow from '../components/SongRow.vue'
 import TabBar from '../components/TabBar.vue'
 import { useFavoritesStore } from '../stores/favorites'
 import { useUserStore } from '../stores/user'
+import { usePlayerStore } from '../stores/player'
 import { useToast } from '../composables/useToast'
 
 const user = useUserStore()
+const player = usePlayerStore()
 const favorites = useFavoritesStore()
 const { toast } = useToast()
 const controls = makeControls(user.clientToken)
@@ -76,6 +78,7 @@ async function load() {
  * @param {Object} song - Song object, must contain an id property.
  */
 async function order(song) {
+  if (!player.tvOnline) { toast('电视离线中，无法点歌'); return }
   try {
     await controls.order(song.id)
     orderedIds.add(song.id)

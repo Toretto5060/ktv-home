@@ -1,6 +1,7 @@
 <template>
   <div class="page">
-    <header class="topbar"><h1>遥控器</h1><span class="online"><i></i>电视在线</span></header>
+    <main :class="{ 'tv-offline': !player.tvOnline }">
+    <header class="topbar"><h1>遥控器</h1><span class="online"><i :class="player.tvOnline ? 'on' : 'off'"></i><span :class="{ off: !player.tvOnline }">{{ (user.roomName || '电视') + (player.tvOnline ? ' 在线' : ' 离线') }}</span></span></header>
     <!-- 当前曲目卡 / Now Playing Card -->
     <section class="sec">
       <div class="now">
@@ -55,6 +56,7 @@
     </section>
 
     <div class="tip"><Lightbulb :size="13" />人声音量请在麦克风上调节</div>
+    </main>
 
     <TabBar active="remote" />
   </div>
@@ -188,7 +190,9 @@ async function effect(e) {
 
 <style scoped>
 .page { min-height: 100vh; padding-bottom: 74px; display: flex; flex-direction: column; }
-.topbar { height:56px;padding:0 16px;display:flex;align-items:center;justify-content:space-between; }.topbar h1 { font-size:18px; }.online { display:flex;align-items:center;gap:6px;color:var(--mint);font-size:11px; }.online i { width:6px;height:6px;border-radius:50%;background:var(--mint); }
+.topbar { height:56px;padding:0 16px;display:flex;align-items:center;justify-content:space-between; }.topbar h1 { font-size:18px; }.online { display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim2); }.online i { width:6px;height:6px;border-radius:50%; }.online i.on { background:var(--mint); }.online i.off { background:var(--red); }
+.online .off { color:var(--red); font-weight:600; }
+.tv-offline * { pointer-events: none; opacity: 0.4; }
 .sec { padding:0 16px;margin-top:18px; }.topbar + .sec { margin-top:4px; }
 .now {
   padding:10px 0 15px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;

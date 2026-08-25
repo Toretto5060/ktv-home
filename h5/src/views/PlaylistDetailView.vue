@@ -34,12 +34,14 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import api, { makeControls } from '../api/client'
 import { useUserStore } from '../stores/user'
+import { usePlayerStore } from '../stores/player'
 import { useToast } from '../composables/useToast'
 import SongRow from '../components/SongRow.vue'
 import TabBar from '../components/TabBar.vue'
 
 const route = useRoute()
 const user = useUserStore()
+const player = usePlayerStore()
 const controls = makeControls(user.clientToken)
 const { toast } = useToast()
 
@@ -63,6 +65,7 @@ onMounted(async () => { try { playlist.value = await api.playlistDetail(route.pa
  * @param {string} song.id - 歌曲 ID / Song ID
  */
 async function orderSong(song) {
+  if (!player.tvOnline) { toast('电视离线中，无法点歌'); return }
   try { await controls.order(song.id); orderedIds.add(song.id); toast('已加入队列') }
   catch (error) { toast(error.message || '点歌失败') }
 }
@@ -72,6 +75,7 @@ async function orderSong(song) {
  * Bulk-order all songs in the playlist at once.
  */
 async function orderAll() {
+  if (!player.tvOnline) { toast('电视离线中，无法点歌'); return }
   ordering.value = true
   try {
     const result = await api.orderPlaylist(playlist.value.id, user.clientToken)

@@ -52,12 +52,14 @@
 import { ref, onMounted, reactive } from 'vue'
 import api, { makeControls } from '../api/client'
 import { useUserStore } from '../stores/user'
+import { usePlayerStore } from '../stores/player'
 import { useToast } from '../composables/useToast'
 import TabBar from '../components/TabBar.vue'
 import SongRow from '../components/SongRow.vue'
 import { ChevronLeft, Search, X } from 'lucide-vue-next'
 
 const user = useUserStore()
+const player = usePlayerStore()
 const { toast } = useToast()
 const controls = makeControls(user.clientToken)
 
@@ -135,6 +137,7 @@ function selectFilter(value) {
  * @param {Object} song - 歌曲对象，需包含 id 属性 / Song object with an id property
  */
 async function order(song) {
+  if (!player.tvOnline) { toast('电视离线中，无法点歌'); return }
   try {
     await controls.order(song.id)
     orderedIds.add(song.id)

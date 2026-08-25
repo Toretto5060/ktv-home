@@ -81,6 +81,12 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
                     session.getAttributes().put("room_id", tvProbe.room.getId().toString());
                 }
             }
+        } else {
+            // H5 连接：补充 room_id 用于后续事件路由
+            Object roomIdParam = session.getAttributes().get("room_id");
+            if (roomIdParam != null) {
+                session.getAttributes().put("room_id", roomIdParam.toString());
+            }
         }
 
         // register() 会创建 SessionInfo 并快照 room_id，必须在 room_id 设置之后调用
@@ -89,6 +95,18 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
         if (tvProbe != null) {
             broadcaster.sendTo(session, tvProbe.toWsEvent());
             tvOfflineWatcher.onTvConnected();
+        }
+
+        // TV 上线时立即通知房间内所有 H5（在线状态变化）
+        String tvRoomId = roomId(session);
+        if (isTv(session) && tvRoomId != null) {
+            broadcaster.broadcast(tvRoomId, WsEvent.of("tv_status", Map.of("online", true)));
+        }
+
+        // H5 连接时告知当前 TV 在线状态（用于首页"电视在线"状态）
+        if (!isTv(session) && tvRoomId != null) {
+            boolean tvOnline = broadcaster.isTvOnline(tvRoomId);
+            broadcaster.sendTo(session, WsEvent.of("tv_status", Map.of("online", tvOnline)));
         }
 
         // 连接/重连只发送当前房间的快照。
@@ -150,7 +168,7 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
      */
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        notifyOfflineIfTv(broadcaster.unregister(session));
+        notifyOfflineIfTv(broadcaster.unregister(session), roomId(session));
         log.debug("WS 连接关闭: {}，剩余在线 {}", session.getId(), broadcaster.sessionCount());
     }
 
@@ -166,7 +184,7 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) {
         log.debug("WS 传输错误 {}: {}", session.getId(), exception.getMessage());
-        notifyOfflineIfTv(broadcaster.unregister(session));
+        notifyOfflineIfTv(broadcaster.unregister(session), roomId(session));
     }
 
     private boolean isTv(WebSocketSession session) {
@@ -179,9 +197,13 @@ public class KtvWebSocketHandler extends TextWebSocketHandler {
         return room == null ? null : room.toString();
     }
 
-    private void notifyOfflineIfTv(String clientType) {
+    private void notifyOfflineIfTv(String clientType, String roomId) {
         if ("tv".equals(clientType)) {
             tvOfflineWatcher.onTvDisconnected();
+            // TV 离线时立即通知房间内所有 H5（在线状态变化）
+            if (roomId != null) {
+                broadcaster.broadcast(roomId, WsEvent.of("tv_status", Map.of("online", false)));
+            }
         }
     }
 }

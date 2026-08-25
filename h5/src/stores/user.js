@@ -10,6 +10,7 @@ const TOKEN_KEY = 'ktv_client_token'
 const NICK_KEY = 'ktv_nickname'
 const ROOM_KEY = 'ktv_joined_room_token'
 const ROOM_ID_KEY = 'ktv_room_id'
+const ROOM_NAME_KEY = 'ktv_room_name'
 
 /**
  * 生成客户端唯一标识 token：优先使用原生 crypto.randomUUID()，不可用时降级为随机字符串。
@@ -52,7 +53,10 @@ export const useUserStore = defineStore('user', {
     joinedRoomToken: localStorage.getItem(ROOM_KEY) || '',
     // 服务端从 QR token 解码出的真实房间 ID
     // The canonical room ID decoded by the server from the QR token
-    roomId: localStorage.getItem(ROOM_ID_KEY) || ''
+    roomId: localStorage.getItem(ROOM_ID_KEY) || '',
+    // 服务端广播的房间名称（从 device_approved 事件获取）
+    // Server-broadcasted room name (from device_approved WS event)
+    roomName: localStorage.getItem(ROOM_NAME_KEY) || ''
   }),
   getters: {
     // 是否已完成初次进入（有 token 且有昵称）
@@ -119,14 +123,44 @@ export const useUserStore = defineStore('user', {
      * Record the QR token of the room the user has successfully joined.
      * @param {string} token - 二维码原始 token / raw QR token
      */
-    setJoinedRoom(token, roomId = '') {
+    setJoinedRoom(token, roomId = '', roomName = '') {
       if (!token) return
       this.joinedRoomToken = token
+      this.roomId = roomId || this.roomId || ''
+      this.roomName = roomName || this.roomName || ''
       localStorage.setItem(ROOM_KEY, token)
-      if (roomId) {
-        this.roomId = roomId
-        localStorage.setItem(ROOM_ID_KEY, roomId)
-      }
+      if (roomId) localStorage.setItem(ROOM_ID_KEY, roomId)
+      if (roomName) localStorage.setItem(ROOM_NAME_KEY, roomName)
+    },
+
+    /**
+     * 用完整房间信息更新缓存（包括名称）。
+     *
+     * Update with full room info (including name).
+     * @param {string} token - QR token
+     * @param {string} roomId - 房间 ID
+     * @param {string} roomName - 房间名称
+     */
+    setJoinedRoomWithName(token, roomId, roomName) {
+      if (!token) return
+      this.joinedRoomToken = token
+      this.roomId = roomId || ''
+      this.roomName = roomName || ''
+      localStorage.setItem(ROOM_KEY, token)
+      if (roomId) localStorage.setItem(ROOM_ID_KEY, roomId)
+      if (roomName) localStorage.setItem(ROOM_NAME_KEY, roomName)
+    },
+
+    /**
+     * 更新房间名称（从 WS device_approved 事件获取）。
+     *
+     * Update room name (from WS device_approved event).
+     * @param {string} name - 房间名称 / room name
+     */
+    setRoomName(name) {
+      if (!name) return
+      this.roomName = name
+      localStorage.setItem(ROOM_NAME_KEY, name)
     },
 
     /**
@@ -137,8 +171,10 @@ export const useUserStore = defineStore('user', {
     clearJoinedRoom() {
       this.joinedRoomToken = ''
       this.roomId = ''
+      this.roomName = ''
       localStorage.removeItem(ROOM_KEY)
       localStorage.removeItem(ROOM_ID_KEY)
+      localStorage.removeItem(ROOM_NAME_KEY)
     }
   }
 })

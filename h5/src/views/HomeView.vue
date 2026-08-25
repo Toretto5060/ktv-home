@@ -2,7 +2,7 @@
   <div class="page">
     <header class="topbar">
       <div class="brand"><img class="brand-mark" src="../assets/home-ktv-logo.png" alt="Home KTV"><div><b>Home KTV</b><small>客厅欢唱局</small></div></div>
-      <span class="room"><i></i>电视在线</span>
+      <span class="room"><i :class="player.tvOnline ? 'on' : 'off'"></i><span :class="{ off: !player.tvOnline }">{{ (user.roomName || '电视') + (player.tvOnline ? ' 在线' : ' 离线') }}</span></span>
     </header>
 
     <section class="sec greeting">
@@ -53,6 +53,7 @@ import { ref, onMounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import api, { makeControls } from '../api/client'
 import { useUserStore } from '../stores/user'
+import { usePlayerStore } from '../stores/player'
 import { useToast } from '../composables/useToast'
 import TabBar from '../components/TabBar.vue'
 import SongRow from '../components/SongRow.vue'
@@ -61,6 +62,7 @@ import { Search, UserRound, Sparkles, UsersRound, ListMusic, Heart, Languages, L
 
 const router = useRouter()
 const user = useUserStore()
+const player = usePlayerStore()
 const { toast } = useToast()
 const controls = makeControls(user.clientToken, user.roomId)
 
@@ -106,6 +108,7 @@ onMounted(async () => {
  * @param {Object} song - Song object, must contain an `id` field
  */
 async function order(song) {
+  if (!player.tvOnline) { toast('电视离线中，无法点歌'); return }
   try {
     await controls.order(song.id)
     orderedIds.add(song.id)
@@ -146,7 +149,11 @@ function onCat(c) {
 .topbar { height: 58px; padding: 8px 16px 0; display: flex; align-items: center; justify-content: space-between; }
 .brand { display:flex;align-items:center;gap:9px; }.brand-mark { width:30px;height:30px;border-radius:7px;object-fit:cover; }
 .brand b,.brand small { display:block; }.brand b { font-size:14px; }.brand small { margin-top:2px;color:var(--dim2);font-size:9px; }
-.room { display:flex;align-items:center;gap:6px;color:var(--mint);font-size:11px; }.room i { width:6px;height:6px;border-radius:50%;background:var(--mint); }
+.room { display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim2); }
+.room i { width:6px;height:6px;border-radius:50%; }
+.room i.on { background:var(--mint); }
+.room i.off { background:var(--red); }
+.room .off { color:var(--red); font-weight:600; }
 .sec { padding: 0 16px; margin-top: 12px; }
 .greeting { margin-top:18px; }.greeting h1 { font-size:24px;line-height:1.2; }.greeting p { margin-top:5px;color:var(--dim);font-size:12px; }
 .search {

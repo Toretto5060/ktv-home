@@ -1,5 +1,6 @@
 <template>
   <div class="page">
+    <main :class="{ 'tv-offline': !player.tvOnline }">
     <!-- 电视离线提示 / TV offline warning -->
     <div v-if="!player.tvOnline" class="offline">电视未连接，歌曲会先排队，电视上线后自动播放</div>
     <div class="sec hd"><b>已点歌曲</b><span>{{ player.queueCount }} 首待唱</span></div>
@@ -55,7 +56,7 @@
         </div>
       </div>
     </section>
-
+    </main>
     <TabBar active="queue" />
   </div>
 </template>
@@ -190,6 +191,8 @@ async function shuffleQueue() {
 
 <style scoped>
 .page { min-height: 100vh; padding-bottom: 74px; display: flex; flex-direction: column; }
+.tv-offline * { pointer-events: none; opacity: 0.45; }
+.tv-offline .offline { pointer-events: auto; opacity: 1; }
 .sec { padding: 0 16px; }
 .hd { display:flex;align-items:center;justify-content:space-between;padding-top:14px;margin-bottom:8px; }.hd b { font-size:18px; }.hd span { color:var(--dim2);font-size:11px; }
 .host-wrap { margin-bottom:12px; }.host-card { display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid rgba(255,198,75,.2);border-radius:6px;background:rgba(255,198,75,.06); }.host-card>div { flex:1;display:flex;flex-direction:column;gap:3px; }.host-card strong { font-size:11px; }.host-card small { color:var(--dim2);font-size:9px; }.shuffle { margin-top:8px;padding:7px 9px;border-radius:3px;background:rgba(255,198,75,.1);color:var(--gold);font-size:10px;font-weight:700; }
